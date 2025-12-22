@@ -610,7 +610,11 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         for idx in idxs_users:
             # local model updating
             local_model = LocalUpdate(args=args, dataset=train_dataset, idxs=user_groups[idx])
-            w, loss, acc, high_protos, low_protos, idx_acc = local_model.update_weights_fedmps(args, idx, global_high_protos, global_low_protos, global_logits, model=copy.deepcopy(local_model_list[idx]), global_round=round)
+            w, loss, acc, high_protos, low_protos, idx_acc = local_model.update_weights_fedmps(
+                args, idx, global_high_protos, global_low_protos, global_logits, 
+                model=copy.deepcopy(local_model_list[idx]), global_round=round,
+                rf_models=rf_models, global_stats=global_stats
+            )
             acc_list_train.append(idx_acc)
             loss_list_train.append(loss['total'])
             agg_high_protos = agg_func(high_protos)

@@ -481,13 +481,77 @@ class LocalUpdate(object):
 
         return model.state_dict(), agg_protos_label
 
-    def update_weights_fedmps(self, args, idx, global_high_protos, global_low_protos, global_logits, model, global_round=round):
-        """ """
+    def compute_mmd_loss(self, local_features, local_labels, global_rf_means, rf_model):
+        """
+        计算基于随机傅里叶特征 (RFF) 的最大均值差异 (MMD) 损失函数。
+        
+        该方法通过对齐本地和全局的 RFF 均值来实现分布对齐。对于每个类别，
+        计算本地 RFF 特征的均值，然后与对应的全局 RFF 均值计算 MSE 损失
+        （这在数学上等价于最小化 MMD）。
+        
+        参数:
+            local_features: 当前 batch 的特征，形状为 (batch_size, feature_dim)
+            local_labels: 当前 batch 的标签，形状为 (batch_size,)
+            global_rf_means: 全局 RFF 均值字典，键为类别索引，值为对应的 RFF 均值张量
+            rf_model: 对应的 RFF 映射模型（RFF 类的实例）
+        
+        返回:
+            float: 所有有效类别 MMD 损失的平均值。如果当前 batch 没有有效类别匹配，返回 0。
+        """
+        # 获取当前 batch 中存在的唯一类别
+        unique_labels = torch.unique(local_labels)
+        
+        if len(unique_labels) == 0:
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        
+        # 将 rf_model 移动到正确的设备
+        # 注意：rf_model 的权重是固定的（buffer），不需要梯度，但我们需要计算输入特征的梯度
+        rf_model = rf_model.to(self.device)
+        
+        # 用于存储每个类别的 MMD 损失
+        mmd_losses = []
+        
+        # 遍历每个类别
+        for label in unique_labels:
+            label_item = label.item()
+            
+            # 检查全局统计量中是否存在该类别的 RFF 均值
+            if label_item not in global_rf_means or global_rf_means[label_item] is None:
+                continue
+            
+            # 提取该类别的本地特征
+            class_mask = (local_labels == label)
+            if class_mask.sum() == 0:
+                continue
+            
+            local_class_features = local_features[class_mask]  # shape: (n_c, feature_dim)
+            
+            # 使用 rf_model 将特征映射到 RFF 空间
+            local_rf_features = rf_model(local_class_features)  # shape: (n_c, rf_dim)
+            
+            # 计算本地 RFF 特征的均值
+            local_rf_mean = local_rf_features.mean(dim=0)  # shape: (rf_dim,)
+            
+            # 获取对应的全局 RFF 均值，确保在正确的 device 上
+            global_rf_mean = global_rf_means[label_item].to(self.device)  # shape: (rf_dim,)
+            
+            # 计算两者之间的 MSE 损失（这在数学上等价于最小化 MMD）
+            mmd_loss = torch.nn.functional.mse_loss(local_rf_mean, global_rf_mean)
+            mmd_losses.append(mmd_loss)
+        
+        # 返回所有有效类别 MMD 损失的平均值
+        if len(mmd_losses) == 0:
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        else:
+            return torch.stack(mmd_losses).mean()
+
+    def update_weights_fedmps(self, args, idx, global_high_protos, global_low_protos, global_logits, model, global_round=round, rf_models=None, global_stats=None):
         """
                 执行 FedMPS 算法的本地更新过程。
 
                 该函数通过结合多级原型对比学习（Multi-Level Prototype-Based Contrastive Learning）和
                 软标签生成（Soft Label Generation）来应对联邦学习中的数据异构性。
+                同时，通过基于随机傅里叶特征 (RFF) 的最大均值差异 (MMD) 损失函数来增强本地与全局的分布对齐。
 
                 参数:
                     args: 全局参数配置对象，包含 alph, beta, gama 等损失权重系数。
@@ -497,16 +561,27 @@ class LocalUpdate(object):
                     global_logits: 由全局模型生成的类别软标签预测，用于知识蒸馏。
                     model: 需要训练的本地模型。
                     global_round: 当前的全局通信轮次。
+                    rf_models: 字典，包含不同层级对应的 RFF 模型实例，例如 
+                               {'high': rff_high, 'low': rff_low}。如果为 None，则不计算 MMD 损失。
+                    global_stats: 字典，包含全局统计量，结构为：
+                                  {'high': {'class_rf_means': [...]}, 'low': {'class_rf_means': [...]}}。
+                                  如果为 None，则不计算 MMD 损失。
 
                 损失函数组成:
                     loss1 (分类损失): 本地预测与真实标签之间的负对数似然损失（NLLLoss）。
                     loss2 (高层对比损失): 本地高层特征与全局高层原型之间的对比学习损失，用于对齐高级语义。
                     loss3 (底层对比损失): 本地底层特征与全局底层原型之间的对比学习损失，用于对齐基础表征。
                     loss4 (蒸馏损失): 本地预测概率与全局模型预测（软标签）之间的 KL 散度，用于引入全局知识。
+                    loss5 (高层 MMD 损失): 基于 RFF 的高层特征分布对齐损失，通过对齐本地和全局的 RFF 均值实现。
+                    loss6 (低层 MMD 损失): 基于 RFF 的低层特征分布对齐损失，通过对齐本地和全局的 RFF 均值实现。
+
+                总损失公式:
+                    loss = loss1 + alph * loss2 + beta * loss3 + gama * loss4 + mmd_gamma * (loss5 + loss6)
+                    其中 mmd_gamma 默认为 0.01，可通过 args.mmd_gamma 配置。
 
                 返回:
                     model.state_dict(): 训练后的模型权重参数。
-                    epoch_loss: 包含各类损失分量的字典（total, 1, 2, 3, 4）。
+                    epoch_loss: 包含各类损失分量的字典（total, 1, 2, 3, 4, 5, 6）。
                     acc_val.item(): 最后一个 batch 的准确率。
                     agg_high_protos_label: 收集到的本地高层原型字典，按标签分类。
                     agg_low_protos_label: 收集到的本地底层原型字典，按标签分类。
@@ -514,7 +589,7 @@ class LocalUpdate(object):
         """
         # Set mode to train model
         model.train()
-        epoch_loss = {'total': [], '1': [], '2': [], '3': [],'4':[]}
+        epoch_loss = {'total': [], '1': [], '2': [], '3': [],'4':[], '5':[], '6':[]}
 
         # Set optimizer for the local updates
         if self.args.optimizer == 'sgd':
@@ -522,10 +597,13 @@ class LocalUpdate(object):
         elif self.args.optimizer == 'adam':
             optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr,weight_decay=1e-4)
 
+        # MMD 损失权重（暂时使用固定值 0.01，后续可以从配置文件读取）
+        mmd_weight = getattr(args, 'mmd_gamma', 0.01)
+
         for iter in range(self.args.train_ep):
             correct = 0
             total = 0
-            batch_loss = {'total': [], '1': [], '2': [], '3': [],'4':[]}
+            batch_loss = {'total': [], '1': [], '2': [], '3': [],'4':[], '5':[], '6':[]}
             agg_high_protos_label = {}
             agg_low_protos_label = {}
             for batch_idx, (images, label_g) in enumerate(self.trainloader):
@@ -569,7 +647,45 @@ class LocalUpdate(object):
                     global_probs = torch.stack(global_probs)
                     loss4 = soft_loss(F.log_softmax(probs / T, dim=1), F.softmax(global_probs / T, dim=1))
 
-                loss = loss1 + args.alph * loss2 + args.beta * loss3 + args.gama*loss4# Note that the weights of the various losses here differ from those in the article
+                # loss5: high-level MMD loss based on RFF
+                # loss6: low-level MMD loss based on RFF
+                if rf_models is not None and global_stats is not None:
+                    # 计算高层 MMD 损失
+                    if 'high' in global_stats and 'class_rf_means' in global_stats['high']:
+                        # 将列表转换为字典，键为类别索引
+                        global_high_rf_means = {}
+                        for c, rf_mean in enumerate(global_stats['high']['class_rf_means']):
+                            if rf_mean is not None and rf_mean.numel() > 0:
+                                global_high_rf_means[c] = rf_mean
+                        loss5 = self.compute_mmd_loss(
+                            local_features=high_protos,
+                            local_labels=labels,
+                            global_rf_means=global_high_rf_means,
+                            rf_model=rf_models['high']
+                        )
+                    else:
+                        loss5 = torch.tensor(0.0, device=self.device, requires_grad=True)
+                    
+                    # 计算低层 MMD 损失
+                    if 'low' in global_stats and 'class_rf_means' in global_stats['low']:
+                        # 将列表转换为字典，键为类别索引
+                        global_low_rf_means = {}
+                        for c, rf_mean in enumerate(global_stats['low']['class_rf_means']):
+                            if rf_mean is not None and rf_mean.numel() > 0:
+                                global_low_rf_means[c] = rf_mean
+                        loss6 = self.compute_mmd_loss(
+                            local_features=low_protos,
+                            local_labels=labels,
+                            global_rf_means=global_low_rf_means,
+                            rf_model=rf_models['low']
+                        )
+                    else:
+                        loss6 = torch.tensor(0.0, device=self.device, requires_grad=True)
+                else:
+                    loss5 = torch.tensor(0.0, device=self.device, requires_grad=True)
+                    loss6 = torch.tensor(0.0, device=self.device, requires_grad=True)
+
+                loss = loss1 + args.alph * loss2 + args.beta * loss3 + args.gama*loss4 + mmd_weight * (loss5 + loss6)  # Note that the weights of the various losses here differ from those in the article
 
 
                 loss.backward()
@@ -600,11 +716,15 @@ class LocalUpdate(object):
                 batch_loss['2'].append(loss2.item())
                 batch_loss['3'].append(loss3.item())
                 batch_loss['4'].append(loss4.item())
+                batch_loss['5'].append(loss5.item())
+                batch_loss['6'].append(loss6.item())
             epoch_loss['total'].append(sum(batch_loss['total']) / len(batch_loss['total']))
             epoch_loss['1'].append(sum(batch_loss['1']) / len(batch_loss['1']))
             epoch_loss['2'].append(sum(batch_loss['2']) / len(batch_loss['2']))
             epoch_loss['3'].append(sum(batch_loss['3']) / len(batch_loss['3']))
-            epoch_loss['4'].append(sum(batch_loss['3']) / len(batch_loss['4']))
+            epoch_loss['4'].append(sum(batch_loss['4']) / len(batch_loss['4']))
+            epoch_loss['5'].append(sum(batch_loss['5']) / len(batch_loss['5']))
+            epoch_loss['6'].append(sum(batch_loss['6']) / len(batch_loss['6']))
             acc_last_epoch = correct / total
 
         epoch_loss['total'] = sum(epoch_loss['total']) / len(epoch_loss['total'])
@@ -612,6 +732,8 @@ class LocalUpdate(object):
         epoch_loss['2'] = sum(epoch_loss['2']) / len(epoch_loss['2'])
         epoch_loss['3'] = sum(epoch_loss['3']) / len(epoch_loss['3'])
         epoch_loss['4'] = sum(epoch_loss['4']) / len(epoch_loss['4'])
+        epoch_loss['5'] = sum(epoch_loss['5']) / len(epoch_loss['5'])
+        epoch_loss['6'] = sum(epoch_loss['6']) / len(epoch_loss['6'])
 
         return model.state_dict(), epoch_loss, acc_val.item(), agg_high_protos_label, agg_low_protos_label, acc_last_epoch
 
