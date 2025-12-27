@@ -573,9 +573,14 @@ class LocalUpdate(object):
                     loss3 (底层对比损失): 本地底层特征与全局底层原型之间的对比学习损失，用于对齐基础表征。
                     loss4 (蒸馏损失): 本地预测概率与全局模型预测（软标签）之间的 KL 散度，用于引入全局知识。
                     loss5 (高层 MMD 损失): 基于 RFF 的高层特征分布对齐损失，通过对齐本地和全局的 RFF 均值实现。
+                                           【已注释，当前不使用，代码保留便于后续切换】
                     loss6 (低层 MMD 损失): 基于 RFF 的低层特征分布对齐损失，通过对齐本地和全局的 RFF 均值实现。
+                                           【已注释，当前不使用，代码保留便于后续切换】
 
-                总损失公式:
+                总损失公式（当前使用）:
+                    loss = loss1 + alph * loss2 + beta * loss3 + gama * loss4
+                    
+                总损失公式（含MMD损失，已注释）:
                     loss = loss1 + alph * loss2 + beta * loss3 + gama * loss4 + mmd_gamma * (loss5 + loss6)
                     其中 mmd_gamma 默认为 0.01，可通过 args.mmd_gamma 配置。
 
@@ -649,43 +654,52 @@ class LocalUpdate(object):
 
                 # loss5: high-level MMD loss based on RFF
                 # loss6: low-level MMD loss based on RFF
-                if rf_models is not None and global_stats is not None:
-                    # 计算高层 MMD 损失
-                    if 'high' in global_stats and 'class_rf_means' in global_stats['high']:
-                        # 将列表转换为字典，键为类别索引
-                        global_high_rf_means = {}
-                        for c, rf_mean in enumerate(global_stats['high']['class_rf_means']):
-                            if rf_mean is not None and rf_mean.numel() > 0:
-                                global_high_rf_means[c] = rf_mean
-                        loss5 = self.compute_mmd_loss(
-                            local_features=high_protos,
-                            local_labels=labels,
-                            global_rf_means=global_high_rf_means,
-                            rf_model=rf_models['high']
-                        )
-                    else:
-                        loss5 = torch.tensor(0.0, device=self.device, requires_grad=True)
-                    
-                    # 计算低层 MMD 损失
-                    if 'low' in global_stats and 'class_rf_means' in global_stats['low']:
-                        # 将列表转换为字典，键为类别索引
-                        global_low_rf_means = {}
-                        for c, rf_mean in enumerate(global_stats['low']['class_rf_means']):
-                            if rf_mean is not None and rf_mean.numel() > 0:
-                                global_low_rf_means[c] = rf_mean
-                        loss6 = self.compute_mmd_loss(
-                            local_features=low_protos,
-                            local_labels=labels,
-                            global_rf_means=global_low_rf_means,
-                            rf_model=rf_models['low']
-                        )
-                    else:
-                        loss6 = torch.tensor(0.0, device=self.device, requires_grad=True)
-                else:
-                    loss5 = torch.tensor(0.0, device=self.device, requires_grad=True)
-                    loss6 = torch.tensor(0.0, device=self.device, requires_grad=True)
+                # ========== 已注释：MMD损失（loss5和loss6）部分，便于后续切换 ==========
+                # 如需启用MMD损失，取消以下注释并修改总损失计算
+                # if rf_models is not None and global_stats is not None:
+                #     # 计算高层 MMD 损失
+                #     if 'high' in global_stats and 'class_rf_means' in global_stats['high']:
+                #         # 将列表转换为字典，键为类别索引
+                #         global_high_rf_means = {}
+                #         for c, rf_mean in enumerate(global_stats['high']['class_rf_means']):
+                #             if rf_mean is not None and rf_mean.numel() > 0:
+                #                 global_high_rf_means[c] = rf_mean
+                #         loss5 = self.compute_mmd_loss(
+                #             local_features=high_protos,
+                #             local_labels=labels,
+                #             global_rf_means=global_high_rf_means,
+                #             rf_model=rf_models['high']
+                #         )
+                #     else:
+                #         loss5 = torch.tensor(0.0, device=self.device, requires_grad=True)
+                #     
+                #     # 计算低层 MMD 损失
+                #     if 'low' in global_stats and 'class_rf_means' in global_stats['low']:
+                #         # 将列表转换为字典，键为类别索引
+                #         global_low_rf_means = {}
+                #         for c, rf_mean in enumerate(global_stats['low']['class_rf_means']):
+                #             if rf_mean is not None and rf_mean.numel() > 0:
+                #                 global_low_rf_means[c] = rf_mean
+                #         loss6 = self.compute_mmd_loss(
+                #             local_features=low_protos,
+                #             local_labels=labels,
+                #             global_rf_means=global_low_rf_means,
+                #             rf_model=rf_models['low']
+                #         )
+                #     else:
+                #         loss6 = torch.tensor(0.0, device=self.device, requires_grad=True)
+                # else:
+                #     loss5 = torch.tensor(0.0, device=self.device, requires_grad=True)
+                #     loss6 = torch.tensor(0.0, device=self.device, requires_grad=True)
+                
+                # 当前设置：不使用MMD损失，loss5和loss6设为0
+                loss5 = torch.tensor(0.0, device=self.device, requires_grad=True)
+                loss6 = torch.tensor(0.0, device=self.device, requires_grad=True)
 
-                loss = loss1 + args.alph * loss2 + args.beta * loss3 + args.gama*loss4 + mmd_weight * (loss5 + loss6)  # Note that the weights of the various losses here differ from those in the article
+                # 原有损失函数（不含MMD损失）
+                loss = loss1 + args.alph * loss2 + args.beta * loss3 + args.gama*loss4  # Note that the weights of the various losses here differ from those in the article
+                # 如需启用MMD损失，使用以下公式替代上面的损失计算：
+                # loss = loss1 + args.alph * loss2 + args.beta * loss3 + args.gama*loss4 + mmd_weight * (loss5 + loss6)
 
 
                 loss.backward()
