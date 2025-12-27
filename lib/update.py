@@ -92,7 +92,7 @@ class LocalUpdate(object):
                 images, labels = images.to(self.device), labels_g.to(self.device)
 
                 model.zero_grad()
-                _,log_probs, _,_ = model(images)
+                logits, log_probs, high_protos, low_protos, projected_features = model(images)
                 loss = self.criterion(log_probs, labels)
 
                 loss.backward()
@@ -134,7 +134,7 @@ class LocalUpdate(object):
                 images, labels = images.to(self.device), labels_g.to(self.device)
 
                 model.zero_grad()
-                _, log_probs, _, _ = model(images)
+                logits, log_probs, high_protos, low_protos, projected_features = model(images)
                 loss = self.criterion(log_probs, labels)
 
                 fed_prox_reg = 0.0
@@ -185,17 +185,20 @@ class LocalUpdate(object):
             for batch_idx, (images, labels_g) in enumerate(self.trainloader):
                 images, labels = images.to(self.device), labels_g.to(self.device)
                 model.zero_grad()
-                _,log_probs, protos,_ = model(images)
+                logits, log_probs, high_protos, low_protos, projected_features = model(images)
+                protos = high_protos  # 使用 high_protos 作为原型
 
                 loss1 = self.criterion(log_probs, labels)
 
-                _,_, pro2,_ = global_model(images)
+                _, _, pro2_high, _, _ = global_model(images)
+                pro2 = pro2_high  # 使用 high_protos 作为原型
                 posi = cos(protos, pro2)
                 logits = posi.reshape(-1, 1)
 
                 for previous_model in previous_models:
                     previous_model.to(args.device)
-                    _,_, pro3,_ = previous_model(images)
+                    _, _, pro3_high, _, _ = previous_model(images)
+                    pro3 = pro3_high  # 使用 high_protos 作为原型
                     nega = cos(protos, pro3)
                     logits = torch.cat((logits, nega.reshape(-1, 1)), dim=1)
 
@@ -374,7 +377,8 @@ class LocalUpdate(object):
                 images, labels = images.to(self.device), labels_g.to(self.device)
 
                 model.zero_grad()
-                _, log_probs, protos, _ = model(images)
+                logits, log_probs, high_protos, low_protos, projected_features = model(images)
+                protos = high_protos  # 使用 high_protos 作为原型
                 loss1 = self.criterion(log_probs, labels)
 
                 loss_mysupcon = MySupConLoss(temperature=0.5)
@@ -455,7 +459,8 @@ class LocalUpdate(object):
 
                 # loss1: cross-entrophy loss, loss2: proto distance loss
                 model.zero_grad()
-                _,log_probs, protos,_= model(images)
+                logits, log_probs, high_protos, low_protos, projected_features = model(images)
+                protos = high_protos  # 使用 high_protos 作为原型
                 loss1 = self.criterion(log_probs, labels)
 
                 loss_mse = nn.MSELoss()
@@ -1142,7 +1147,8 @@ def test_inference(args, model, test_dataset,user_groups_gt,idx):
         images, labels = images.to(device), labels.to(device)
 
         # Inference
-        _,outputs, protos,_ = model(images)
+        logits, log_probs, high_protos, low_protos, projected_features = model(images)
+        outputs = log_probs  # 使用 log_probs 作为输出
         batch_loss = criterion(outputs, labels)
         loss += batch_loss.item()
 
@@ -1171,7 +1177,8 @@ def test_inference_new(args, local_model_list, test_dataset, classes_list, globa
         for idx in range(args.num_users):
             images = images.to(args.device)
             model = local_model_list[idx]
-            probs, protos = model(images)  # outputs 64*6
+            logits, log_probs, high_protos, low_protos, projected_features = model(images)
+            probs = log_probs  # 使用 log_probs 作为概率
             prob_list.append(probs)
 
         outputs = torch.zeros(size=(images.shape[0], 10)).to(device)  # outputs 64*10
@@ -1219,7 +1226,8 @@ def test_inference_new_het(args, local_model_list, test_dataset, global_protos=[
         for idx in range(args.num_users):
             images = images.to(args.device)
             model = local_model_list[idx]
-            _, protos = model(images)
+            logits, log_probs, high_protos, low_protos, projected_features = model(images)
+            protos = high_protos  # 使用 high_protos 作为原型
             protos_list.append(protos)
 
         ensem_proto = torch.zeros(size=(images.shape[0], protos.shape[1])).to(device)
@@ -1271,7 +1279,8 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
         for batch_idx, (images, labels) in enumerate(testloader):
             images, labels = images.to(device), labels.to(device)
             model.zero_grad()
-            probs,outputs, protos,_ = model(images)
+            logits, log_probs, high_protos, low_protos, projected_features = model(images)
+            outputs = log_probs  # 使用 log_probs 作为输出
 
             batch_loss = criterion(outputs, labels)
             loss_wo += batch_loss.item()
@@ -1295,7 +1304,9 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
             for batch_idx, (images, labels) in enumerate(testloader):
                 images, labels = images.to(device), labels.to(device)
                 model.zero_grad()
-                probs, outputs, protos ,_= model(images)
+                logits, log_probs, high_protos, low_protos, projected_features = model(images)
+                outputs = log_probs  # 使用 log_probs 作为输出
+                protos = high_protos  # 使用 high_protos 作为原型
 
                 # compute the dist between protos and global_protos
                 a_large_num = 100
@@ -1358,7 +1369,9 @@ def test_inference_fedproto(args,logger, local_model_list, test_dataset, classes
         for batch_idx, (images, labels) in enumerate(testloader):
             images, labels = images.to(device), labels.to(device)
             model.zero_grad()
-            _,outputs, protos,_ = model(images)
+            logits, log_probs, high_protos, low_protos, projected_features = model(images)
+            outputs = log_probs  # 使用 log_probs 作为输出
+            protos = high_protos  # 使用 high_protos 作为原型
 
             batch_loss1 = criterion(outputs, labels)
 
@@ -1380,7 +1393,9 @@ def test_inference_fedproto(args,logger, local_model_list, test_dataset, classes
             for batch_idx, (images, labels) in enumerate(testloader):
                 images, labels = images.to(device), labels.to(device)
                 model.zero_grad()
-                _,outputs, protos,_ = model(images)
+                logits, log_probs, high_protos, low_protos, projected_features = model(images)
+                outputs = log_probs  # 使用 log_probs 作为输出
+                protos = high_protos  # 使用 high_protos 作为原型
 
                 # compute the dist between protos and global_protos
                 a_large_num = 10000

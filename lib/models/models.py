@@ -27,19 +27,27 @@ class CNNMnist(nn.Module):
         )
 
     def forward(self, x):
-        x = F.relu(F.max_pool2d(self.conv1(x), 2))
-        x_low = x.view(-1, x.shape[1] * x.shape[2] * x.shape[3])
-        x_low = F.normalize(x_low, dim=1)
-        x = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(x)), 2))
-        x = x.view(-1, x.shape[1]*x.shape[2]*x.shape[3])
-        x1 = F.relu(self.fc1(x))
-        x1 = F.normalize(x1, dim=1)
-        x = F.dropout(x1, training=self.training)
-        logits = self.fc2(x)
-        # Project high-level features for contrastive learning
-        projected_features = self.projector(x1)
-        projected_features = F.normalize(projected_features, dim=1)
-        return logits, F.log_softmax(logits, dim=1), x1, x_low, projected_features
+        # 1. 低级特征阶段
+        feat_low_raw = F.relu(F.max_pool2d(self.conv1(x), 2))
+        feat_low_flat = feat_low_raw.view(-1, feat_low_raw.shape[1] * feat_low_raw.shape[2] * feat_low_raw.shape[3])
+        low_level_features = F.normalize(feat_low_flat, dim=1)
+        
+        # 2. 高级特征阶段
+        feat_high_raw = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(feat_low_raw)), 2))
+        feat_high_flat = feat_high_raw.view(-1, feat_high_raw.shape[1]*feat_high_raw.shape[2]*feat_high_raw.shape[3])
+        feat_high_encoded = F.relu(self.fc1(feat_high_flat))
+        high_level_features = F.normalize(feat_high_encoded, dim=1)
+        
+        # 3. 分类与投影阶段
+        feat_for_classifier = F.dropout(high_level_features, training=self.training)
+        logits = self.fc2(feat_for_classifier)
+        log_probs = F.log_softmax(logits, dim=1)
+        
+        # 对比学习投影
+        proj_output = self.projector(high_level_features)
+        projected_features = F.normalize(proj_output, dim=1)
+        
+        return logits, log_probs, high_level_features, low_level_features, projected_features
 
 
 class CNNFemnist(nn.Module):
@@ -60,19 +68,27 @@ class CNNFemnist(nn.Module):
         )
 
     def forward(self, x):
-        x = F.relu(F.max_pool2d(self.conv1(x), 2))
-        x = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(x)), 2))
-        x_low = x.view(-1, x.shape[1] * x.shape[2] * x.shape[3])
-        x_low = F.normalize(x_low, dim=1)
-        x = x.view(-1, x.shape[1]*x.shape[2]*x.shape[3])
-        x1 = F.relu(self.fc1(x))
-        x1 = F.normalize(x1, dim=1)
-        x = F.dropout(x1, training=self.training)
-        logits = self.fc2(x)
-        # Project high-level features for contrastive learning
-        projected_features = self.projector(x1)
-        projected_features = F.normalize(projected_features, dim=1)
-        return logits, F.log_softmax(logits, dim=1), x1, x_low, projected_features
+        # 1. 低级特征阶段
+        feat_low_raw = F.relu(F.max_pool2d(self.conv1(x), 2))
+        feat_low_flat = feat_low_raw.view(-1, feat_low_raw.shape[1] * feat_low_raw.shape[2] * feat_low_raw.shape[3])
+        low_level_features = F.normalize(feat_low_flat, dim=1)
+        
+        # 2. 高级特征阶段
+        feat_high_raw = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(feat_low_raw)), 2))
+        feat_high_flat = feat_high_raw.view(-1, feat_high_raw.shape[1]*feat_high_raw.shape[2]*feat_high_raw.shape[3])
+        feat_high_encoded = F.relu(self.fc1(feat_high_flat))
+        high_level_features = F.normalize(feat_high_encoded, dim=1)
+        
+        # 3. 分类与投影阶段
+        feat_for_classifier = F.dropout(high_level_features, training=self.training)
+        logits = self.fc2(feat_for_classifier)
+        log_probs = F.log_softmax(logits, dim=1)
+        
+        # 对比学习投影
+        proj_output = self.projector(high_level_features)
+        projected_features = F.normalize(proj_output, dim=1)
+        
+        return logits, log_probs, high_level_features, low_level_features, projected_features
 
 
 class CNNCifar(nn.Module):
@@ -85,7 +101,7 @@ class CNNCifar(nn.Module):
         self.fc1 = nn.Linear(120, 84)
         self.fc2 = nn.Linear(84, args.num_classes)
         # Projector for contrastive learning
-        dim = self.fc1.out_features  # 84
+        dim = self.fc0.out_features  # 120 (high_level_features 来自 fc0 的输出)
         self.projector = nn.Sequential(
             nn.Linear(dim, 256),
             nn.BatchNorm1d(256),
@@ -94,19 +110,27 @@ class CNNCifar(nn.Module):
         )
 
     def forward(self, x):
-        x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
-        x_low = x.view(-1, x.shape[1] * x.shape[2] * x.shape[3])
-        x_low= F.normalize(x_low, dim=1)
-        x = x.view(-1, 16 * 5 * 5)
-        x1 = F.relu(self.fc0(x))
-        x1 = F.normalize(x1, dim=1)
-        x = F.relu(self.fc1(x1))# base encoder
-        logits = self.fc2(x)
-        # Project high-level features for contrastive learning
-        projected_features = self.projector(x1)
-        projected_features = F.normalize(projected_features, dim=1)
-        return logits, F.log_softmax(logits, dim=1), x1, x_low, projected_features
+        # 1. 低级特征阶段
+        feat_low_raw = self.pool(F.relu(self.conv1(x)))
+        feat_low_raw = self.pool(F.relu(self.conv2(feat_low_raw)))
+        feat_low_flat = feat_low_raw.view(-1, feat_low_raw.shape[1] * feat_low_raw.shape[2] * feat_low_raw.shape[3])
+        low_level_features = F.normalize(feat_low_flat, dim=1)
+        
+        # 2. 高级特征阶段
+        feat_high_flat = feat_low_raw.view(-1, 16 * 5 * 5)
+        feat_high_encoded = F.relu(self.fc0(feat_high_flat))
+        high_level_features = F.normalize(feat_high_encoded, dim=1)
+        
+        # 3. 分类与投影阶段
+        feat_for_classifier = F.relu(self.fc1(high_level_features))  # base encoder
+        logits = self.fc2(feat_for_classifier)
+        log_probs = F.log_softmax(logits, dim=1)
+        
+        # 对比学习投影
+        proj_output = self.projector(high_level_features)
+        projected_features = F.normalize(proj_output, dim=1)
+        
+        return logits, log_probs, high_level_features, low_level_features, projected_features
 
 class CNNFashion_Mnist(nn.Module):
     def __init__(self, args):
@@ -132,17 +156,25 @@ class CNNFashion_Mnist(nn.Module):
         )
 
     def forward(self, x):
-        out = self.layer1(x)
-        x_low = out.view(-1, out.shape[1] * out.shape[2] * out.shape[3])
-        x_low = F.normalize(x_low, dim=1)
-        out = self.layer2(out)
-        out = out.view(out.size(0), -1)
-        x1 = F.normalize(out, dim=1)
-        logits = self.fc(x1)
-        # Project high-level features for contrastive learning
-        projected_features = self.projector(x1)
-        projected_features = F.normalize(projected_features, dim=1)
-        return logits, F.log_softmax(logits, dim=1), x1, x_low, projected_features
+        # 1. 低级特征阶段
+        feat_low_raw = self.layer1(x)
+        feat_low_flat = feat_low_raw.view(-1, feat_low_raw.shape[1] * feat_low_raw.shape[2] * feat_low_raw.shape[3])
+        low_level_features = F.normalize(feat_low_flat, dim=1)
+        
+        # 2. 高级特征阶段
+        feat_high_raw = self.layer2(feat_low_raw)
+        feat_high_flat = feat_high_raw.view(feat_high_raw.size(0), -1)
+        high_level_features = F.normalize(feat_high_flat, dim=1)
+        
+        # 3. 分类与投影阶段
+        logits = self.fc(high_level_features)
+        log_probs = F.log_softmax(logits, dim=1)
+        
+        # 对比学习投影
+        proj_output = self.projector(high_level_features)
+        projected_features = F.normalize(proj_output, dim=1)
+        
+        return logits, log_probs, high_level_features, low_level_features, projected_features
 
 
 class ResNetWithFeatures(nn.Module):
@@ -179,23 +211,29 @@ class ResNetWithFeatures(nn.Module):
         )
 
     def forward(self, x):
+        # 1. 低级特征阶段
         x = self.stem(x)
-        x = self.layer1(x)  # 16.31
-        x_low = x.view(-1, x.shape[1] * x.shape[2] * x.shape[3])
-        x_low = F.normalize(x_low, dim=1)
-        x = self.layer2(x)  #
+        feat_low_raw = self.layer1(x)  # Low-level feature
+        feat_low_flat = feat_low_raw.view(-1, feat_low_raw.shape[1] * feat_low_raw.shape[2] * feat_low_raw.shape[3])
+        low_level_features = F.normalize(feat_low_flat, dim=1)
+        
+        # 2. 高级特征阶段
+        x = self.layer2(feat_low_raw)
         out = self.layer3(x)
-
-        x = self.layer4(out)  # (bs,512,7,7)
-
-        pooled = self.avgpool(x)
-        pooled = torch.flatten(pooled, 1)
-        x_high = F.normalize(pooled, dim=1)
-        logits = self.fc(pooled)
-        # Project high-level features for contrastive learning
-        projected_features = self.projector(x_high)
-        projected_features = F.normalize(projected_features, dim=1)
-        return logits, F.log_softmax(logits, dim=1), x_high, x_low, projected_features
+        feat_high_raw = self.layer4(out)  # High-level feature (bs,512,7,7)
+        pooled = self.avgpool(feat_high_raw)
+        feat_high_flat = torch.flatten(pooled, 1)
+        high_level_features = F.normalize(feat_high_flat, dim=1)
+        
+        # 3. 分类与投影阶段
+        logits = self.fc(feat_high_flat)
+        log_probs = F.log_softmax(logits, dim=1)
+        
+        # 对比学习投影
+        proj_output = self.projector(high_level_features)
+        projected_features = F.normalize(proj_output, dim=1)
+        
+        return logits, log_probs, high_level_features, low_level_features, projected_features
 
 
 class ModelCT(nn.Module):
@@ -207,10 +245,19 @@ class ModelCT(nn.Module):
         num_ftrs = basemodel.fc.in_features
         # projection MLP
         self.l1 = nn.Linear(num_ftrs, num_ftrs)
-        self.l2 = nn.Linear(num_ftrs, out_dim)# out_dim=256
+        self.l2 = nn.Linear(num_ftrs, out_dim)  # out_dim=256
 
         # last layer
         self.l3 = nn.Linear(out_dim, n_classes)
+        
+        # Projector for contrastive learning
+        dim = num_ftrs  # 使用 l1 的输入维度作为 projector 的输入
+        self.projector = nn.Sequential(
+            nn.Linear(dim, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Linear(256, 128)
+        )
 
     def _get_basemodel(self, model_name):
         try:
@@ -220,16 +267,26 @@ class ModelCT(nn.Module):
             raise ("Invalid model name. Check the config file and pass one of: resnet18 or resnet50")
 
     def forward(self, x):
-        h = self.features(x)
-        h = h.squeeze()
-        x_low = F.normalize(h, dim=1)
-        x = self.l1(h)
-        x1 = F.relu(x)
-        x1 = F.normalize(x1, dim=1)
-        x = self.l2(x1)
-
-        y = self.l3(x)
-        return y,F.log_softmax(y, dim=1),x1,x_low
+        # 1. 低级特征阶段
+        feat_low_raw = self.features(x)
+        feat_low_flat = feat_low_raw.squeeze()
+        low_level_features = F.normalize(feat_low_flat, dim=1)
+        
+        # 2. 高级特征阶段
+        feat_high_encoded = self.l1(feat_low_flat)
+        feat_high_encoded = F.relu(feat_high_encoded)
+        high_level_features = F.normalize(feat_high_encoded, dim=1)
+        
+        # 3. 分类与投影阶段
+        feat_for_classifier = self.l2(high_level_features)
+        logits = self.l3(feat_for_classifier)
+        log_probs = F.log_softmax(logits, dim=1)
+        
+        # 对比学习投影（使用高级特征作为输入）
+        proj_output = self.projector(high_level_features)
+        projected_features = F.normalize(proj_output, dim=1)
+        
+        return logits, log_probs, high_level_features, low_level_features, projected_features
 
 class GlobalFedmps(nn.Module):
     def __init__(self, args):

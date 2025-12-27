@@ -103,7 +103,7 @@ def args_parser():
     # Note: For globally balanced datasets (e.g., CIFAR-10), synthetic feature numbers should be consistent
     parser.add_argument('--enable_safs', type=int, default=1, 
                         help='Enable SAFS feature synthesis (0: disabled, 1: enabled, default: 1)')
-    parser.add_argument('--safs_steps', type=int, default=1000, 
+    parser.add_argument('--safs_steps', type=int, default=200, 
                         help='Number of optimization steps for SAFS feature synthesis')
     parser.add_argument('--safs_lr', type=float, default=0.1, 
                         help='Learning rate for SAFS feature synthesis')

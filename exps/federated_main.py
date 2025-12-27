@@ -557,11 +557,12 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
     
     with torch.no_grad():
         dummy_output = dummy_model(dummy_input)
-        if isinstance(dummy_output, tuple) and len(dummy_output) >= 4:
-            high_feature_dim = dummy_output[2].shape[1]  # high-level feature dimension
-            low_feature_dim = dummy_output[3].shape[1]   # low-level feature dimension
+        if isinstance(dummy_output, tuple) and len(dummy_output) >= 5:
+            # 返回值顺序: logits, log_probs, high_level_features, low_level_features, projected_features
+            high_feature_dim = dummy_output[2].shape[1]  # high-level feature dimension (索引2)
+            low_feature_dim = dummy_output[3].shape[1]   # low-level feature dimension (索引3)
         else:
-            raise ValueError(f"模型输出格式不符合预期，无法获取特征维度")
+            raise ValueError(f"模型输出格式不符合预期，期望5个返回值，实际得到{len(dummy_output) if isinstance(dummy_output, tuple) else '非元组'}")
     
     print(f'Detected feature dimensions: high={high_feature_dim}, low={low_feature_dim}')
     logger.info(f'Detected feature dimensions: high={high_feature_dim}, low={low_feature_dim}')
