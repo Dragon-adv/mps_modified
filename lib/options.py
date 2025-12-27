@@ -45,7 +45,7 @@ def args_parser():
                         of dataset")
     parser.add_argument('--num_classes', type=int, default=10, help="number \
                         of classes")
-    parser.add_argument('--gpu', default=0, help="To use cuda, set \
+    parser.add_argument('--gpu', type=int, default=0, help="To use cuda, set \
                         to a specific GPU ID. Default set to use CPU.")
     parser.add_argument('--optimizer', type=str, default='sgd', help="type \
                         of optimizer")
@@ -100,15 +100,15 @@ def args_parser():
                         help='Statistics computation level: high (only high-level), low (only low-level), or both (default: high)')
 
     # for SFD SAFS (Synthetic Feature-based Decoupled training)
-    parser.add_argument('--enable_safs', type=int, default=0, 
+    parser.add_argument('--enable_safs', type=int, default=1,
                         help='Enable SAFS feature synthesis (0: disabled, 1: enabled)')
-    parser.add_argument('--safs_steps', type=int, default=1000, 
+    parser.add_argument('--safs_steps', type=int, default=100,
                         help='Number of optimization steps for SAFS feature synthesis')
     parser.add_argument('--safs_lr', type=float, default=0.1, 
                         help='Learning rate for SAFS feature synthesis')
-    parser.add_argument('--safs_max_syn_num', type=int, default=2000, 
+    parser.add_argument('--safs_max_syn_num', type=int, default=600,
                         help='Maximum synthetic features for the smallest class (default: 2000)')
-    parser.add_argument('--safs_min_syn_num', type=int, default=600, 
+    parser.add_argument('--safs_min_syn_num', type=int, default=600,
                         help='Minimum synthetic features for the largest class (default: 600)')
     parser.add_argument('--safs_target_cov_eps', type=float, default=1e-5, 
                         help='Jitter for target covariance matrix in MeanCov Aligner (default: 1e-5)')
@@ -118,6 +118,16 @@ def args_parser():
                         help='Number of epochs for SAFS global model fine-tuning (default: 5)')
     parser.add_argument('--safs_finetune_batch_size', type=int, default=32, 
                         help='Batch size for SAFS global model fine-tuning (default: 32)')
+
+    # for ABBL (Adaptive Branch-Based Learning) module
+    parser.add_argument('--beta_pi', type=float, default=0.5,
+                        help='Missing class compensation coefficient for ABBL (suggested: 0.1-1.0)')
+    parser.add_argument('--gamma_la', type=float, default=0.1,
+                        help='Logit Adjustment scaling factor for ABBL (suggested: 0.1)')
+    parser.add_argument('--beta_scl_init', type=float, default=1.0,
+                        help='Initial weight for supervised contrastive learning in ABBL')
+    parser.add_argument('--tau_scl', type=float, default=0.5,
+                        help='Temperature coefficient for contrastive learning in ABBL')
 
     args = parser.parse_args()
     return args

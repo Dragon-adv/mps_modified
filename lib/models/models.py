@@ -15,6 +15,12 @@ class CNNMnist(nn.Module):
         self.conv2_drop = nn.Dropout2d()
         self.fc1 = nn.Linear(int(320/20*args.out_channels), 50)
         self.fc2 = nn.Linear(50, args.num_classes)
+        # ABBL projector: two-layer MLP with ReLU, output dim 128
+        self.projector = nn.Sequential(
+            nn.Linear(50, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128)
+        )
 
     def forward(self, x):
         x = F.relu(F.max_pool2d(self.conv1(x), 2))
@@ -24,9 +30,12 @@ class CNNMnist(nn.Module):
         x = x.view(-1, x.shape[1]*x.shape[2]*x.shape[3])
         x1 = F.relu(self.fc1(x))
         x1 = F.normalize(x1, dim=1)
+        # ABBL: project high-level features and normalize
+        projected_features = self.projector(x1)
+        projected_features = F.normalize(projected_features, dim=1)
         x = F.dropout(x1, training=self.training)
         x = self.fc2(x)
-        return x,F.log_softmax(x, dim=1), x1,x_low
+        return x, F.log_softmax(x, dim=1), x1, x_low, projected_features
 
 
 class CNNFemnist(nn.Module):
@@ -37,6 +46,12 @@ class CNNFemnist(nn.Module):
         self.conv2_drop = nn.Dropout2d()
         self.fc1 = nn.Linear(int(16820/20*args.out_channels), 50)
         self.fc2 = nn.Linear(50, args.num_classes)
+        # ABBL projector: two-layer MLP with ReLU, output dim 128
+        self.projector = nn.Sequential(
+            nn.Linear(50, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128)
+        )
 
     def forward(self, x):
         x = F.relu(F.max_pool2d(self.conv1(x), 2))
@@ -46,9 +61,12 @@ class CNNFemnist(nn.Module):
         x = x.view(-1, x.shape[1]*x.shape[2]*x.shape[3])
         x1 = F.relu(self.fc1(x))
         x1 = F.normalize(x1, dim=1)
+        # ABBL: project high-level features and normalize
+        projected_features = self.projector(x1)
+        projected_features = F.normalize(projected_features, dim=1)
         x = F.dropout(x1, training=self.training)
         x = self.fc2(x)
-        return x,F.log_softmax(x, dim=1), x1,x_low
+        return x, F.log_softmax(x, dim=1), x1, x_low, projected_features
 
 
 class CNNCifar(nn.Module):
@@ -60,6 +78,12 @@ class CNNCifar(nn.Module):
         self.fc0 = nn.Linear(16 * 5 * 5, 120)
         self.fc1 = nn.Linear(120, 84)
         self.fc2 = nn.Linear(84, args.num_classes)
+        # ABBL projector: two-layer MLP with ReLU, output dim 128
+        self.projector = nn.Sequential(
+            nn.Linear(120, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128)
+        )
 
     def forward(self, x):
         x = self.pool(F.relu(self.conv1(x)))
@@ -69,9 +93,12 @@ class CNNCifar(nn.Module):
         x = x.view(-1, 16 * 5 * 5)
         x1 = F.relu(self.fc0(x))
         x1 = F.normalize(x1, dim=1)
+        # ABBL: project high-level features and normalize
+        projected_features = self.projector(x1)
+        projected_features = F.normalize(projected_features, dim=1)
         x = F.relu(self.fc1(x1))# base encoder
         x = self.fc2(x)
-        return x,F.log_softmax(x, dim=1), x1,x_low
+        return x, F.log_softmax(x, dim=1), x1, x_low, projected_features
 
 class CNNFashion_Mnist(nn.Module):
     def __init__(self, args):
@@ -87,6 +114,12 @@ class CNNFashion_Mnist(nn.Module):
             nn.ReLU(),
             nn.MaxPool2d(2))
         self.fc = nn.Linear(7*7*32, 10)
+        # ABBL projector: two-layer MLP with ReLU, output dim 128
+        self.projector = nn.Sequential(
+            nn.Linear(7*7*32, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128)
+        )
 
     def forward(self, x):
         out = self.layer1(x)
@@ -95,8 +128,11 @@ class CNNFashion_Mnist(nn.Module):
         out = self.layer2(out)
         out = out.view(out.size(0), -1)
         x1 = F.normalize(out, dim=1)
+        # ABBL: project high-level features and normalize
+        projected_features = self.projector(x1)
+        projected_features = F.normalize(projected_features, dim=1)
         x = self.fc(x1)
-        return x,F.log_softmax(x, dim=1), x1, x_low
+        return x, F.log_softmax(x, dim=1), x1, x_low, projected_features
 
 
 class ResNetWithFeatures(nn.Module):
@@ -123,6 +159,12 @@ class ResNetWithFeatures(nn.Module):
         self.layer4 = net.layer4  # High-level feature
         self.avgpool = net.avgpool
         self.fc = nn.Linear(net.fc.in_features, num_classes)
+        # ABBL projector: two-layer MLP with ReLU, output dim 128
+        self.projector = nn.Sequential(
+            nn.Linear(net.fc.in_features, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128)
+        )
 
     def forward(self, x):
         x = self.stem(x)
@@ -137,9 +179,12 @@ class ResNetWithFeatures(nn.Module):
         pooled = self.avgpool(x)
         pooled = torch.flatten(pooled, 1)
         x_high = F.normalize(pooled, dim=1)
+        # ABBL: project high-level features and normalize
+        projected_features = self.projector(pooled)
+        projected_features = F.normalize(projected_features, dim=1)
         logits = self.fc(pooled)
 
-        return logits, F.log_softmax(logits, dim=1), x_high, x_low
+        return logits, F.log_softmax(logits, dim=1), x_high, x_low, projected_features
 
 
 class ModelCT(nn.Module):
@@ -155,6 +200,12 @@ class ModelCT(nn.Module):
 
         # last layer
         self.l3 = nn.Linear(out_dim, n_classes)
+        # ABBL projector: two-layer MLP with ReLU, output dim 128
+        self.projector = nn.Sequential(
+            nn.Linear(num_ftrs, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128)
+        )
 
     def _get_basemodel(self, model_name):
         try:
@@ -170,10 +221,13 @@ class ModelCT(nn.Module):
         x = self.l1(h)
         x1 = F.relu(x)
         x1 = F.normalize(x1, dim=1)
+        # ABBL: project high-level features and normalize
+        projected_features = self.projector(h)
+        projected_features = F.normalize(projected_features, dim=1)
         x = self.l2(x1)
 
         y = self.l3(x)
-        return y,F.log_softmax(y, dim=1),x1,x_low
+        return y, F.log_softmax(y, dim=1), x1, x_low, projected_features
 
 class GlobalFedmps(nn.Module):
     def __init__(self, args):

@@ -594,7 +594,7 @@ class LocalUpdate(object):
         """
         # Set mode to train model
         model.train()
-        epoch_loss = {'total': [], '1': [], '2': [], '3': [],'4':[], '5':[], '6':[]}
+        epoch_loss = {'total': [], '1': [], '2': [], '3': [],'4':[], '5':[], '6':[], '7':[], '8':[]}
 
         # Set optimizer for the local updates
         if self.args.optimizer == 'sgd':
@@ -604,21 +604,31 @@ class LocalUpdate(object):
 
         # MMD 损失权重（暂时使用固定值 0.01，后续可以从配置文件读取）
         mmd_weight = getattr(args, 'mmd_gamma', 0.01)
+        
+        # ABBL: 统计本地分布（在训练开始前计算一次）
+        n_k = self.compute_local_distribution(args)
 
         for iter in range(self.args.train_ep):
             correct = 0
             total = 0
-            batch_loss = {'total': [], '1': [], '2': [], '3': [],'4':[], '5':[], '6':[]}
+            batch_loss = {'total': [], '1': [], '2': [], '3': [],'4':[], '5':[], '6':[], '7':[], '8':[]}
             agg_high_protos_label = {}
             agg_low_protos_label = {}
             for batch_idx, (images, label_g) in enumerate(self.trainloader):
                 images, labels = images.to(self.device), label_g.to(self.device)
 
                 model.zero_grad()
-                probs, log_probs, high_protos, low_protos = model(images)
+                # ABBL: 模型现在返回5个值，包括 projected_features
+                probs, log_probs, high_protos, low_protos, projected_features = model(images)
 
-                # loss1: classification loss
-                loss1 = self.criterion(log_probs, labels)# nn.NLLLoss()
+                # loss1: classification loss (原有)
+                loss1_original = self.criterion(log_probs, labels)# nn.NLLLoss()
+                
+                # ABBL loss7: 自适应交叉熵损失 L_ace (公式 2.1)
+                loss7_ace = self.compute_adaptive_cross_entropy_loss(probs, labels, n_k, args)
+                
+                # 使用 ABBL 的自适应交叉熵损失替代原有的分类损失
+                loss1 = loss7_ace
 
                 # loss2: high-level contrastive learning loss between local features and global prototypes
                 # loss3: low-level contrastive learning loss between local features and global prototypes
@@ -695,11 +705,20 @@ class LocalUpdate(object):
                 # 当前设置：不使用MMD损失，loss5和loss6设为0
                 loss5 = torch.tensor(0.0, device=self.device, requires_grad=True)
                 loss6 = torch.tensor(0.0, device=self.device, requires_grad=True)
+                
+                # ABBL loss8: 自适应监督对比学习损失 L_ascl (公式 2.2)
+                loss8_ascl = self.compute_adaptive_supervised_contrastive_loss(
+                    projected_features, labels, n_k, args
+                )
+                
+                # ABBL: 计算对比权重余弦退火 (公式 2.3)
+                beta_scl = self.compute_cosine_annealing_weight(global_round, args)
 
-                # 原有损失函数（不含MMD损失）
-                loss = loss1 + args.alph * loss2 + args.beta * loss3 + args.gama*loss4  # Note that the weights of the various losses here differ from those in the article
+                # 总损失函数（集成 ABBL）
+                # loss = loss1 (L_ace) + alph * loss2 + beta * loss3 + gama * loss4 + beta_scl * loss8 (L_ascl)
+                loss = loss1 + args.alph * loss2 + args.beta * loss3 + args.gama * loss4 + beta_scl * loss8_ascl
                 # 如需启用MMD损失，使用以下公式替代上面的损失计算：
-                # loss = loss1 + args.alph * loss2 + args.beta * loss3 + args.gama*loss4 + mmd_weight * (loss5 + loss6)
+                # loss = loss1 + args.alph * loss2 + args.beta * loss3 + args.gama*loss4 + beta_scl * loss8_ascl + mmd_weight * (loss5 + loss6)
 
 
                 loss.backward()
@@ -719,12 +738,15 @@ class LocalUpdate(object):
                 correct += torch.eq(y_hat, labels.squeeze()).int().sum().item()
                 total += labels.size(0)
                 if self.args.verbose and (batch_idx % 10 == 0):
-                    print('| Global Round : {} | User: {} | Local Epoch : {} | [{}/{} ({:.0f}%)]\tLoss: {:.3f} | Acc: {:.3f}'.format(
+                    print('| Global Round : {} | User: {} | Local Epoch : {} | [{}/{} ({:.0f}%)]\tLoss: {:.3f} | Acc: {:.3f} | L_ace: {:.3f} | L_ascl: {:.3f} | beta_scl: {:.3f}'.format(
                             global_round, idx, iter, batch_idx * len(images),
                             len(self.trainloader.dataset),
                             100. * batch_idx / len(self.trainloader),
                             loss.item(),
-                            acc_val.item()))
+                            acc_val.item(),
+                            loss7_ace.item(),
+                            loss8_ascl.item(),
+                            beta_scl))
                 batch_loss['total'].append(loss.item())
                 batch_loss['1'].append(loss1.item())
                 batch_loss['2'].append(loss2.item())
@@ -732,6 +754,8 @@ class LocalUpdate(object):
                 batch_loss['4'].append(loss4.item())
                 batch_loss['5'].append(loss5.item())
                 batch_loss['6'].append(loss6.item())
+                batch_loss['7'].append(loss7_ace.item())
+                batch_loss['8'].append(loss8_ascl.item())
             epoch_loss['total'].append(sum(batch_loss['total']) / len(batch_loss['total']))
             epoch_loss['1'].append(sum(batch_loss['1']) / len(batch_loss['1']))
             epoch_loss['2'].append(sum(batch_loss['2']) / len(batch_loss['2']))
@@ -739,6 +763,8 @@ class LocalUpdate(object):
             epoch_loss['4'].append(sum(batch_loss['4']) / len(batch_loss['4']))
             epoch_loss['5'].append(sum(batch_loss['5']) / len(batch_loss['5']))
             epoch_loss['6'].append(sum(batch_loss['6']) / len(batch_loss['6']))
+            epoch_loss['7'].append(sum(batch_loss['7']) / len(batch_loss['7']))
+            epoch_loss['8'].append(sum(batch_loss['8']) / len(batch_loss['8']))
             acc_last_epoch = correct / total
 
         epoch_loss['total'] = sum(epoch_loss['total']) / len(epoch_loss['total'])
@@ -748,6 +774,8 @@ class LocalUpdate(object):
         epoch_loss['4'] = sum(epoch_loss['4']) / len(epoch_loss['4'])
         epoch_loss['5'] = sum(epoch_loss['5']) / len(epoch_loss['5'])
         epoch_loss['6'] = sum(epoch_loss['6']) / len(epoch_loss['6'])
+        epoch_loss['7'] = sum(epoch_loss['7']) / len(epoch_loss['7'])
+        epoch_loss['8'] = sum(epoch_loss['8']) / len(epoch_loss['8'])
 
         return model.state_dict(), epoch_loss, acc_val.item(), agg_high_protos_label, agg_low_protos_label, acc_last_epoch
 
@@ -783,6 +811,180 @@ class LocalUpdate(object):
             i += 1
         global_labels = labels
         return global_input, global_labels
+
+    def compute_local_distribution(self, args):
+        """
+        统计本地数据分布，计算各类别样本数序列 n_k。
+        
+        参数:
+            args: 参数对象，包含 num_classes
+            
+        返回:
+            n_k: 张量，形状为 (num_classes,)，表示各类别样本数
+        """
+        n_k = torch.zeros(args.num_classes, dtype=torch.long)
+        for _, labels in self.trainloader:
+            labels_1d = labels.squeeze() if labels.dim() > 1 else labels
+            for label in labels_1d:
+                n_k[label.item()] += 1
+        return n_k.to(self.device)
+
+    def compute_adaptive_cross_entropy_loss(self, logits, labels, n_k, args):
+        """
+        计算自适应交叉熵损失 L_ace (公式 2.1)。
+        
+        参数:
+            logits: 模型预测的 logits，形状为 (batch_size, num_classes)
+            labels: 真实标签，形状为 (batch_size,)
+            n_k: 各类别样本数，形状为 (num_classes,)
+            args: 参数对象，包含 beta_pi, gamma_la, num_classes
+            
+        返回:
+            loss: 自适应交叉熵损失值
+        """
+        num_classes = args.num_classes
+        beta_pi = args.beta_pi
+        gamma_la = args.gamma_la
+        
+        # 计算 n_min: 非缺失类别中的最小样本数
+        # 找到所有非零的样本数（即存在的类别）
+        non_zero_mask = n_k > 0
+        if non_zero_mask.sum() == 0:
+            # 如果没有存在的类别，使用默认值
+            n_min = torch.tensor(1.0, device=self.device)
+        else:
+            n_min = n_k[non_zero_mask].min().float()
+        
+        # 计算自适应概率项 pi_k
+        pi_k = torch.zeros(num_classes, device=self.device)
+        for k in range(num_classes):
+            if n_k[k] > 0:
+                # 类别存在：使用实际样本数
+                pi_k[k] = n_k[k].float()
+            else:
+                # 类别缺失：使用 beta_pi * n_min
+                pi_k[k] = beta_pi * n_min
+        
+        # 计算 logit adjustment: log(pi_k)
+        # 添加小的 epsilon 避免 log(0)
+        epsilon = 1e-8
+        log_pi = torch.log(pi_k + epsilon)
+        
+        # 应用 logit adjustment: logits + gamma_la * log_pi
+        adjusted_logits = logits + gamma_la * log_pi.unsqueeze(0)
+        
+        # 计算交叉熵损失
+        loss = F.cross_entropy(adjusted_logits, labels, reduction='mean')
+        
+        return loss
+
+    def compute_adaptive_supervised_contrastive_loss(self, projected_features, labels, n_k, args):
+        """
+        计算自适应监督对比学习损失 L_ascl (公式 2.2)。
+        
+        参数:
+            projected_features: Projector 输出的特征，形状为 (batch_size, proj_dim)，已 L2 归一化
+            labels: 真实标签，形状为 (batch_size,)
+            n_k: 各类别样本数，形状为 (num_classes,)
+            args: 参数对象，包含 tau_scl, num_classes
+            
+        返回:
+            loss: 自适应监督对比学习损失值
+        """
+        batch_size = projected_features.shape[0]
+        tau_scl = args.tau_scl
+        num_classes = args.num_classes
+        
+        # 计算余弦相似度矩阵: sim(z_i, z_j) = z_i^T z_j (因为已归一化)
+        similarity_matrix = torch.matmul(projected_features, projected_features.t())  # (batch_size, batch_size)
+        
+        # 除以温度系数
+        similarity_matrix = similarity_matrix / tau_scl
+        
+        # 计算正样本掩码: P(i) = {j: y_j = y_i, j != i}
+        labels_expanded = labels.unsqueeze(1)  # (batch_size, 1)
+        positive_mask = (labels_expanded == labels_expanded.t()).float()  # (batch_size, batch_size)
+        # 排除自身
+        positive_mask = positive_mask - torch.eye(batch_size, device=self.device)
+        
+        # 计算本地分布偏移项 delta_k
+        # delta_k = n_k / (sum of n_k for all classes in batch)
+        # 为了向量化，我们为每个样本计算其类别的 delta
+        unique_labels_in_batch = torch.unique(labels)
+        delta_k = torch.zeros(num_classes, device=self.device)
+        for k in range(num_classes):
+            if n_k[k] > 0:
+                # 计算该类别在所有存在类别中的相对比例
+                total_samples = n_k[n_k > 0].sum().float()
+                if total_samples > 0:
+                    delta_k[k] = n_k[k].float() / total_samples
+        
+        # 为每个样本获取其类别的 delta
+        delta_per_sample = delta_k[labels]  # (batch_size,)
+        
+        # 计算自适应负样本偏移: 对于负样本，增加来自样本数较多类别的排斥力
+        # 负样本掩码
+        negative_mask = 1.0 - positive_mask - torch.eye(batch_size, device=self.device)
+        
+        # 为每个负样本对计算 delta 调整
+        # 对于样本 i 和负样本 j，调整项为 delta_k[y_j]
+        delta_negative = delta_k[labels].unsqueeze(1)  # (batch_size, 1)
+        adjusted_similarity = similarity_matrix.clone()
+        # 对负样本应用 delta 调整（增加排斥力）
+        adjusted_similarity = adjusted_similarity - negative_mask * delta_negative * 0.5  # 0.5 是调整强度
+        
+        # 计算对比损失
+        # 对于每个样本 i，计算 exp(sim(z_i, z_j)) 对于所有 j
+        exp_sim = torch.exp(adjusted_similarity)  # (batch_size, batch_size)
+        
+        # 分子: 正样本的 exp(sim)
+        numerator = (exp_sim * positive_mask).sum(dim=1)  # (batch_size,)
+        
+        # 分母: 所有样本的 exp(sim) 之和（排除自身）
+        denominator = exp_sim.sum(dim=1) - torch.exp(torch.diag(adjusted_similarity))  # (batch_size,)
+        
+        # 避免除零
+        denominator = torch.clamp(denominator, min=1e-8)
+        
+        # 计算损失: -log(numerator / denominator)
+        loss_per_sample = -torch.log(numerator / denominator + 1e-8)
+        
+        # 如果某个样本没有正样本（只有自身），则损失为 0
+        has_positive = positive_mask.sum(dim=1) > 0
+        loss_per_sample = loss_per_sample * has_positive.float()
+        
+        # 返回平均损失
+        if has_positive.sum() > 0:
+            loss = loss_per_sample[has_positive].mean()
+        else:
+            loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+        
+        return loss
+
+    def compute_cosine_annealing_weight(self, global_round, args):
+        """
+        计算对比权重余弦退火策略 (公式 2.3)。
+        
+        参数:
+            global_round: 当前全局轮次
+            args: 参数对象，包含 beta_scl_init, rounds
+            
+        返回:
+            beta_scl: 当前轮次的对比学习权重（Python float）
+        """
+        import math
+        beta_scl_init = args.beta_scl_init
+        max_rounds = args.rounds
+        
+        # 余弦退火: beta_scl = beta_scl_init * (1 + cos(pi * t / T)) / 2
+        # 其中 t 是当前轮次，T 是总轮次
+        if max_rounds > 0:
+            cos_value = math.cos(math.pi * global_round / max_rounds)
+            beta_scl = beta_scl_init * (1.0 + cos_value) / 2.0
+        else:
+            beta_scl = beta_scl_init
+        
+        return beta_scl
 
 
     def inference(self, model):
@@ -871,11 +1073,12 @@ class LocalUpdate(object):
                 labels = labels.to(self.device)
 
                 # 调用模型获取输出
-                # 根据 FedMPS 模型结构：return logits, log_probs, high_protos, low_protos
+                # 根据 FedMPS 模型结构（ABBL）：return logits, log_probs, high_protos, low_protos, projected_features
                 output = model(images)
                 
                 # 提取 high-level 和 low-level 特征
                 # 索引 2 对应 high_protos，索引 3 对应 low_protos
+                # 索引 4 是 projected_features（ABBL新增），但这里不需要
                 if isinstance(output, tuple) and len(output) >= 4:
                     high_features = output[2]  # high-level features
                     low_features = output[3]   # low-level features
