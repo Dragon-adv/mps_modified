@@ -29,6 +29,7 @@ from lib.update import *
 from lib.models.models import *
 from lib.utils import *
 from lib.sfd_utils import RFF, aggregate_global_statistics
+from lib.safs import MeanCovAligner, feature_synthesis, make_syn_nums
 
 model_urls = {
     'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
@@ -673,6 +674,80 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         
         print(f'[Round {round+1}] Global statistics aggregation completed')
         logger.info(f'[Round {round+1}] Global statistics aggregation completed')
+        
+        # ========== SFD SAFS Feature Synthesis Stage ==========
+        # 如果启用了 SAFS，执行特征合成
+        if getattr(args, 'enable_safs', 0) == 1:
+            print(f'[Round {round+1}] Starting SAFS feature synthesis...')
+            logger.info(f'[Round {round+1}] Starting SAFS feature synthesis...')
+            
+            # 确定使用的层级（与统计量聚合层级一致）
+            level_to_use = stats_level if stats_level in ['high', 'low'] else 'high'
+            
+            # 获取对应层级的全局统计量和 RFF 模型
+            if level_to_use == 'high':
+                global_stats_level = global_stats['high']
+                rf_model = rf_models['high']
+                feature_dim = high_feature_dim
+            else:  # level_to_use == 'low'
+                global_stats_level = global_stats['low']
+                rf_model = rf_models['low']
+                feature_dim = low_feature_dim
+            
+            # 提取全局统计量
+            class_means = global_stats_level['class_means']
+            class_covs = global_stats_level['class_covs']
+            class_rf_means = global_stats_level['class_rf_means']
+            sample_per_class = global_stats['sample_per_class']
+            
+            # 计算每个类别的合成特征数量
+            syn_nums = make_syn_nums(
+                class_sizes=sample_per_class.tolist(),
+                max_num=getattr(args, 'safs_max_syn_num', 2000),
+                min_num=getattr(args, 'safs_min_syn_num', 600)
+            )
+            
+            # 验证合成特征数量是否足够（必须大于特征维度）
+            assert min(syn_nums) > feature_dim, \
+                f'最小合成特征数量 {min(syn_nums)} 必须大于特征维度 {feature_dim}'
+            
+            print(f'[Round {round+1}] Synthetic feature numbers per class: {syn_nums}')
+            logger.info(f'[Round {round+1}] Synthetic feature numbers per class: {syn_nums}')
+            
+            # 为每个类别创建 MeanCov Aligner
+            aligners = []
+            for c in range(args.num_classes):
+                aligner = MeanCovAligner(
+                    target_mean=class_means[c],
+                    target_cov=class_covs[c],
+                    target_cov_eps=getattr(args, 'safs_target_cov_eps', 1e-5)
+                )
+                aligners.append(aligner)
+            
+            # 执行特征合成
+            class_syn_datasets = feature_synthesis(
+                feature_dim=feature_dim,
+                class_num=args.num_classes,
+                device=args.device,
+                aligners=aligners,
+                rf_model=rf_model,
+                class_rf_means=class_rf_means,
+                steps=getattr(args, 'safs_steps', 1000),
+                lr=getattr(args, 'safs_lr', 0.1),
+                syn_num_per_class=syn_nums,
+                input_cov_eps=getattr(args, 'safs_input_cov_eps', 1e-5),
+            )
+            
+            print(f'[Round {round+1}] SAFS feature synthesis completed')
+            logger.info(f'[Round {round+1}] SAFS feature synthesis completed')
+            print(f'[Round {round+1}] Generated synthetic features for {len(class_syn_datasets)} classes')
+            logger.info(f'[Round {round+1}] Generated synthetic features for {len(class_syn_datasets)} classes')
+            
+            # 可选：保存合成特征数据集（用于后续的分类器微调）
+            # 这里可以根据需要保存到文件或传递给分类器微调阶段
+            # 例如：torch.save(class_syn_datasets, f'{logdir}/synthetic_features_round_{round+1}.pt')
+        else:
+            class_syn_datasets = None
 
         # test
         acc_list_l, loss_list_l, acc_list_g, loss_list, loss_total_list = test_inference_new_het_lt(args,local_model_list,test_dataset,classes_list,user_groups_lt,global_high_protos)

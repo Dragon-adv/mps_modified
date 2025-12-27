@@ -99,5 +99,21 @@ def args_parser():
                         choices=['high', 'low', 'both'],
                         help='Statistics computation level: high (only high-level), low (only low-level), or both (default: high)')
 
+    # for SFD SAFS (Synthetic Feature-based Decoupled training)
+    parser.add_argument('--enable_safs', type=int, default=0, 
+                        help='Enable SAFS feature synthesis (0: disabled, 1: enabled)')
+    parser.add_argument('--safs_steps', type=int, default=1000, 
+                        help='Number of optimization steps for SAFS feature synthesis')
+    parser.add_argument('--safs_lr', type=float, default=0.1, 
+                        help='Learning rate for SAFS feature synthesis')
+    parser.add_argument('--safs_max_syn_num', type=int, default=2000, 
+                        help='Maximum synthetic features for the smallest class (default: 2000)')
+    parser.add_argument('--safs_min_syn_num', type=int, default=600, 
+                        help='Minimum synthetic features for the largest class (default: 600)')
+    parser.add_argument('--safs_target_cov_eps', type=float, default=1e-5, 
+                        help='Jitter for target covariance matrix in MeanCov Aligner (default: 1e-5)')
+    parser.add_argument('--safs_input_cov_eps', type=float, default=1e-5, 
+                        help='Jitter for input covariance matrix in MeanCov Aligner (default: 1e-5)')
+
     args = parser.parse_args()
     return args
