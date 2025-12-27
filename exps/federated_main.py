@@ -647,13 +647,17 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         print(f'[Round {round+1}] Collecting local statistics from all clients...')
         logger.info(f'[Round {round+1}] Collecting local statistics from all clients...')
         
+        # 获取统计量计算层级（从 args 中获取，默认为 'high'）
+        stats_level = getattr(args, 'stats_level', 'high')
+        
         client_responses = []
         for idx in idxs_users:
             local_model = LocalUpdate(args=args, dataset=train_dataset, idxs=user_groups[idx])
             local_stats = local_model.get_local_statistics(
                 model=copy.deepcopy(local_model_list[idx]),
                 rf_models=rf_models,
-                args=args
+                args=args,
+                stats_level=stats_level
             )
             client_responses.append(local_stats)
         
@@ -663,7 +667,8 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         
         global_stats = aggregate_global_statistics(
             client_responses=client_responses,
-            class_num=args.num_classes
+            class_num=args.num_classes,
+            stats_level=stats_level
         )
         
         print(f'[Round {round+1}] Global statistics aggregation completed')

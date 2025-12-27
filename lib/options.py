@@ -95,6 +95,9 @@ def args_parser():
     parser.add_argument('--rbf_gamma_high', type=float, default=0.01, help='RBF gamma parameter for high-level RFF model')
     parser.add_argument('--rbf_gamma_low', type=float, default=0.01, help='RBF gamma parameter for low-level RFF model')
     parser.add_argument('--rf_type', type=str, default='orf', help='RFF type: orf or iid')
+    parser.add_argument('--stats_level', type=str, default='high', 
+                        choices=['high', 'low', 'both'],
+                        help='Statistics computation level: high (only high-level), low (only low-level), or both (default: high)')
 
     args = parser.parse_args()
     return args

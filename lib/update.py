@@ -795,7 +795,7 @@ class LocalUpdate(object):
         accuracy = correct/total
         return accuracy, loss
 
-    def get_local_statistics(self, model, rf_models, args):
+    def get_local_statistics(self, model, rf_models, args, stats_level='high'):
         """
         计算本地统计量，用于 SFD 算法的统计量聚合阶段。
 
@@ -809,24 +809,39 @@ class LocalUpdate(object):
             rf_models: 字典，包含不同层级对应的 RFF 模型实例，例如 
                        {'high': rff_high, 'low': rff_low}
             args: 全局参数对象，包含 num_classes 等信息
+            stats_level: 统计量计算层级选择，可选值：
+                        - 'high': 仅计算 high-level 统计量（默认）
+                        - 'low': 仅计算 low-level 统计量
+                        - 'both': 计算 high-level 和 low-level 统计量
 
         返回:
             dict: 包含以下结构的字典
-                - 'high': 包含 high-level 统计量的字典
+                - 'high': 包含 high-level 统计量的字典（如果 stats_level 为 'high' 或 'both'）
                     - 'class_means': 每个类别的特征均值列表
                     - 'class_outers': 每个类别的特征外积均值列表
                     - 'class_rf_means': 每个类别的随机特征均值列表
-                - 'low': 包含 low-level 统计量的字典（结构同上）
+                - 'low': 包含 low-level 统计量的字典（如果 stats_level 为 'low' 或 'both'，结构同上）
                 - 'sample_per_class': 每个类别的样本数（两个层级共享）
         """
+        # 确定需要计算的层级
+        compute_high = (stats_level == 'high' or stats_level == 'both')
+        compute_low = (stats_level == 'low' or stats_level == 'both')
+        
         # 准备工作：将 model 和 rf_models 设置为 eval 模式并移动到设备
         model.eval()
         model = model.to(self.device)
         
-        # 将各个层级的 RFF 模型设置为 eval 模式并移动到设备
-        for level in rf_models:
-            rf_models[level].eval()
-            rf_models[level] = rf_models[level].to(self.device)
+        # 将需要计算的层级的 RFF 模型设置为 eval 模式并移动到设备
+        levels_to_compute = []
+        if compute_high:
+            levels_to_compute.append('high')
+        if compute_low:
+            levels_to_compute.append('low')
+        
+        for level in levels_to_compute:
+            if level in rf_models:
+                rf_models[level].eval()
+                rf_models[level] = rf_models[level].to(self.device)
 
         # 初始化列表来存储不同层级的特征、标签和随机特征
         zs_high = []  # high-level 特征列表
@@ -853,25 +868,31 @@ class LocalUpdate(object):
                 else:
                     raise ValueError(f"模型输出格式不符合预期，期望包含至少4个元素的元组，实际得到: {type(output)}")
 
-                # 使用对应的 RFF 模型计算随机特征
-                rf_high = rf_models['high'](high_features)
-                rf_low = rf_models['low'](low_features)
-
-                # 将特征、标签和随机特征存入列表（转移到 CPU 以节省显存）
-                zs_high.append(high_features.cpu())
-                zs_low.append(low_features.cpu())
                 # 确保标签是一维的
                 labels_1d = labels.squeeze() if labels.dim() > 1 else labels
                 ys.append(labels_1d.cpu())
-                rfs_high.append(rf_high.cpu())
-                rfs_low.append(rf_low.cpu())
+
+                # 根据 stats_level 选择性地计算和存储特征
+                if compute_high:
+                    rf_high = rf_models['high'](high_features)
+                    zs_high.append(high_features.cpu())
+                    rfs_high.append(rf_high.cpu())
+                
+                if compute_low:
+                    rf_low = rf_models['low'](low_features)
+                    zs_low.append(low_features.cpu())
+                    rfs_low.append(rf_low.cpu())
 
         # 将列表拼接成大张量
-        z_high = torch.cat(zs_high, dim=0)  # shape: (total_samples, high_feature_dim)
-        z_low = torch.cat(zs_low, dim=0)    # shape: (total_samples, low_feature_dim)
-        y = torch.cat(ys, dim=0)            # shape: (total_samples,)
-        rf_high = torch.cat(rfs_high, dim=0)  # shape: (total_samples, high_rf_dim)
-        rf_low = torch.cat(rfs_low, dim=0)    # shape: (total_samples, low_rf_dim)
+        y = torch.cat(ys, dim=0)  # shape: (total_samples,)
+        
+        if compute_high:
+            z_high = torch.cat(zs_high, dim=0)  # shape: (total_samples, high_feature_dim)
+            rf_high = torch.cat(rfs_high, dim=0)  # shape: (total_samples, high_rf_dim)
+        
+        if compute_low:
+            z_low = torch.cat(zs_low, dim=0)    # shape: (total_samples, low_feature_dim)
+            rf_low = torch.cat(rfs_low, dim=0)    # shape: (total_samples, low_rf_dim)
 
         # 计算每个类别的样本数（两个层级共享）
         num_classes = args.num_classes
@@ -941,22 +962,28 @@ class LocalUpdate(object):
                 'class_rf_means': class_rf_means
             }
         
-        # 分别计算 high-level 和 low-level 的统计量
-        high_stats = compute_level_stats(z_high, rf_high, 'high')
-        low_stats = compute_level_stats(z_low, rf_low, 'low')
+        # 根据 stats_level 选择性地计算统计量
+        result = {
+            'sample_per_class': sample_per_class
+        }
+        
+        if compute_high:
+            high_stats = compute_level_stats(z_high, rf_high, 'high')
+            result['high'] = high_stats
+        
+        if compute_low:
+            low_stats = compute_level_stats(z_low, rf_low, 'low')
+            result['low'] = low_stats
         
         # 将 model 和 rf_models 移回 CPU 以释放显存
         model.cpu()
-        for level in rf_models:
-            rf_models[level].cpu()
+        for level in levels_to_compute:
+            if level in rf_models:
+                rf_models[level].cpu()
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
         # 返回按层级组织的统计量字典
-        return {
-            'high': high_stats,
-            'low': low_stats,
-            'sample_per_class': sample_per_class
-        }
+        return result
 
 
 def test_inference(args, model, test_dataset,user_groups_gt,idx):

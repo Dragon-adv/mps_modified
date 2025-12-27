@@ -135,7 +135,7 @@ class RFF(nn.Module):
         return Z
 
 
-def aggregate_global_statistics(client_responses, class_num):
+def aggregate_global_statistics(client_responses, class_num, stats_level='high'):
     """
     在服务器端聚合客户端上传的统计量，计算全局统计量。
 
@@ -144,43 +144,68 @@ def aggregate_global_statistics(client_responses, class_num):
 
     参数:
         client_responses: 客户端响应列表，每个元素是一个字典，包含：
-            - 'high': 包含 high-level 统计量的字典
+            - 'high': 包含 high-level 统计量的字典（如果 stats_level 为 'high' 或 'both'）
                 - 'class_means': 每个类别的特征均值列表
                 - 'class_outers': 每个类别的特征外积均值列表
                 - 'class_rf_means': 每个类别的随机特征均值列表
-            - 'low': 包含 low-level 统计量的字典（结构同上）
+            - 'low': 包含 low-level 统计量的字典（如果 stats_level 为 'low' 或 'both'，结构同上）
             - 'sample_per_class': 每个类别的样本数
         class_num: 类别总数
+        stats_level: 统计量聚合层级选择，可选值：
+                    - 'high': 仅聚合 high-level 统计量（默认）
+                    - 'low': 仅聚合 low-level 统计量
+                    - 'both': 聚合 high-level 和 low-level 统计量
 
     返回:
         dict: 包含以下结构的字典
-            - 'high': 包含 high-level 全局统计量的字典
+            - 'high': 包含 high-level 全局统计量的字典（如果 stats_level 为 'high' 或 'both'）
                 - 'class_means': 全局类别均值列表
                 - 'class_covs': 全局类别协方差列表
                 - 'class_rf_means': 全局类别随机特征均值列表
-            - 'low': 包含 low-level 全局统计量的字典（结构同上）
+            - 'low': 包含 low-level 全局统计量的字典（如果 stats_level 为 'low' 或 'both'，结构同上）
             - 'sample_per_class': 全局每个类别的样本数
     """
     assert len(client_responses) > 0, 'No client stats responses to aggregate.'
     
+    # 确定需要聚合的层级
+    aggregate_high = (stats_level == 'high' or stats_level == 'both')
+    aggregate_low = (stats_level == 'low' or stats_level == 'both')
+    
     # 初始化：读取第一个响应以获取 feature_dim 和 rf_dim
     first_response = client_responses[0]
     
-    # 获取 high-level 和 low-level 的维度信息
-    # 从第一个响应的第一个类别的统计量中获取维度
-    high_feature_dim = first_response['high']['class_means'][0].shape[0]
-    high_rf_dim = first_response['high']['class_rf_means'][0].shape[0]
-    low_feature_dim = first_response['low']['class_means'][0].shape[0]
-    low_rf_dim = first_response['low']['class_rf_means'][0].shape[0]
+    # 获取需要聚合的层级的维度信息
+    high_feature_dim = None
+    high_rf_dim = None
+    low_feature_dim = None
+    low_rf_dim = None
+    ori_dtype = None
     
-    # 获取原始数据类型（用于最后转换回原始精度）
-    ori_dtype = first_response['high']['class_means'][0].dtype
+    if aggregate_high:
+        if 'high' not in first_response:
+            raise ValueError("stats_level 包含 'high'，但客户端响应中缺少 'high' 统计量")
+        high_feature_dim = first_response['high']['class_means'][0].shape[0]
+        high_rf_dim = first_response['high']['class_rf_means'][0].shape[0]
+        ori_dtype = first_response['high']['class_means'][0].dtype
+    
+    if aggregate_low:
+        if 'low' not in first_response:
+            raise ValueError("stats_level 包含 'low'，但客户端响应中缺少 'low' 统计量")
+        low_feature_dim = first_response['low']['class_means'][0].shape[0]
+        low_rf_dim = first_response['low']['class_rf_means'][0].shape[0]
+        if ori_dtype is None:
+            ori_dtype = first_response['low']['class_means'][0].dtype
     
     # 初始化全局样本数
     global_sample_per_class = torch.zeros(class_num)
     
-    # 为 'high' 和 'low' 两个层级分别初始化用于累加的全局统计量容器（使用 float64 精度）
-    levels = ['high', 'low']
+    # 为需要聚合的层级分别初始化用于累加的全局统计量容器（使用 float64 精度）
+    levels = []
+    if aggregate_high:
+        levels.append('high')
+    if aggregate_low:
+        levels.append('low')
+    
     global_stats_accum = {}
     
     for level in levels:
@@ -217,12 +242,10 @@ def aggregate_global_statistics(client_responses, class_num):
     
     # 计算全局统计量 (Normalization & Covariance)
     global_stats = {
-        'high': {},
-        'low': {},
         'sample_per_class': global_sample_per_class
     }
     
-    # 遍历每个层级
+    # 遍历每个需要聚合的层级
     for level in levels:
         # 初始化结果列表
         means = []
