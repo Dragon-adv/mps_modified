@@ -2,10 +2,12 @@
 # -*- coding: utf-8 -*-
 # Python version: 3.6
 
+import math
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 from lib.conloss import *
 from lib.utils import *
 from lib.ntdloss import *
+from lib.sfd_loss import make_pi_sample_per_class, logit_adjustment_ce, a_scl_loss
 
 class DatasetSplit(Dataset):
     """An abstract Dataset class wrapped around Pytorch Dataset class.
@@ -40,6 +42,24 @@ class LocalUpdate(object):
         self.criterion = nn.NLLLoss().to(self.device)   # Negative Log Likelihood Loss; nn.CrossEntropyLoss = nn.LogSoftmax + nn.NLLLoss
         self.ntd_criterion = NTD_Loss(args.num_classes, args.ntd_tau, args.ntd_beta)
         self.gkd_criterion = nn.CrossEntropyLoss(reduction="mean")
+        
+        # ABBL: 统计当前 Client 数据集的每个类别样本数量
+        # 遍历 trainloader 收集所有标签
+        all_labels = []
+        for _, labels in self.trainloader:
+            all_labels.append(labels)
+        # 拼接所有标签并统计每个类别的样本数
+        if len(all_labels) > 0:
+            all_labels_tensor = torch.cat(all_labels, dim=0)
+            real_sample_per_class = all_labels_tensor.bincount(minlength=args.num_classes)
+        else:
+            real_sample_per_class = torch.zeros(args.num_classes, dtype=torch.long)
+        
+        # 计算平滑后的类别分布 π（用于 L_ACE 和 L_A-SCL）
+        beta_pi = getattr(args, 'beta_pi', 1.0)
+        self.pi_sample_per_class = make_pi_sample_per_class(real_sample_per_class, beta_pi)
+        # 移动到设备
+        self.pi_sample_per_class = self.pi_sample_per_class.to(self.device)
 
     def train_val_test(self, dataset, idxs):
         """
@@ -545,48 +565,43 @@ class LocalUpdate(object):
         else:
             return torch.stack(mmd_losses).mean()
 
-    def update_weights_fedmps(self, args, idx, global_high_protos, global_low_protos, global_logits, model, global_round=round, rf_models=None, global_stats=None):
+    def update_weights_fedmps(self, args, idx, global_high_protos, global_low_protos, global_logits, model, global_round=round, total_rounds=None, rf_models=None, global_stats=None):
         """
-                执行 FedMPS 算法的本地更新过程。
+                执行 FedMPS 算法的本地更新过程（集成 ABBL）。
 
-                该函数通过结合多级原型对比学习（Multi-Level Prototype-Based Contrastive Learning）和
-                软标签生成（Soft Label Generation）来应对联邦学习中的数据异构性。
-                同时，通过基于随机傅里叶特征 (RFF) 的最大均值差异 (MMD) 损失函数来增强本地与全局的分布对齐。
+                该函数通过结合多级原型对比学习（Multi-Level Prototype-Based Contrastive Learning）、
+                软标签生成（Soft Label Generation）以及 ABBL (Adaptive Bi-Branch Learning) 损失函数
+                来应对联邦学习中的数据异构性和长尾分布问题。
 
                 参数:
-                    args: 全局参数配置对象，包含 alph, beta, gama 等损失权重系数。
+                    args: 全局参数配置对象，包含 alph, beta, gama, a_ce_gamma, scl_weight_start, scl_weight_end, scl_temperature 等损失权重系数。
                     idx: 当前客户端的索引 ID。
                     global_high_protos: 从服务器获取的全局高级特征原型。
                     global_low_protos: 从服务器获取的全局低级特征原型。
                     global_logits: 由全局模型生成的类别软标签预测，用于知识蒸馏。
-                    model: 需要训练的本地模型。
+                    model: 需要训练的本地模型（包含 projector）。
                     global_round: 当前的全局通信轮次。
+                    total_rounds: 总通信轮次数，用于计算余弦退火的 scl_weight。如果为 None，则使用 args.rounds。
                     rf_models: 字典，包含不同层级对应的 RFF 模型实例，例如 
                                {'high': rff_high, 'low': rff_low}。如果为 None，则不计算 MMD 损失。
                     global_stats: 字典，包含全局统计量，结构为：
                                   {'high': {'class_rf_means': [...]}, 'low': {'class_rf_means': [...]}}。
                                   如果为 None，则不计算 MMD 损失。
 
-                损失函数组成:
-                    loss1 (分类损失): 本地预测与真实标签之间的负对数似然损失（NLLLoss）。
-                    loss2 (高层对比损失): 本地高层特征与全局高层原型之间的对比学习损失，用于对齐高级语义。
-                    loss3 (底层对比损失): 本地底层特征与全局底层原型之间的对比学习损失，用于对齐基础表征。
-                    loss4 (蒸馏损失): 本地预测概率与全局模型预测（软标签）之间的 KL 散度，用于引入全局知识。
-                    loss5 (高层 MMD 损失): 基于 RFF 的高层特征分布对齐损失，通过对齐本地和全局的 RFF 均值实现。
-                                           【已注释，当前不使用，代码保留便于后续切换】
-                    loss6 (低层 MMD 损失): 基于 RFF 的低层特征分布对齐损失，通过对齐本地和全局的 RFF 均值实现。
-                                           【已注释，当前不使用，代码保留便于后续切换】
+                损失函数组成（ABBL 集成版本）:
+                    loss_ace (L_ACE): 自适应交叉熵损失，使用 logit_adjustment_ce 计算。
+                    loss_scl (L_A-SCL): 自适应监督对比学习损失，使用 a_scl_loss 计算。
+                    loss_proto_high: 本地高层特征与全局高层原型之间的对比学习损失，用于对齐高级语义。
+                    loss_proto_low: 本地底层特征与全局底层原型之间的对比学习损失，用于对齐基础表征。
+                    loss_soft: 本地预测概率与全局模型预测（软标签）之间的 KL 散度，用于引入全局知识。
 
-                总损失公式（当前使用）:
-                    loss = loss1 + alph * loss2 + beta * loss3 + gama * loss4
-                    
-                总损失公式（含MMD损失，已注释）:
-                    loss = loss1 + alph * loss2 + beta * loss3 + gama * loss4 + mmd_gamma * (loss5 + loss6)
-                    其中 mmd_gamma 默认为 0.01，可通过 args.mmd_gamma 配置。
+                总损失公式（ABBL 集成版本）:
+                    loss = loss_ace + scl_weight * loss_scl + args.alph * loss_proto_high + args.beta * loss_proto_low + args.gama * loss_soft
+                    其中 scl_weight 通过余弦退火从 args.scl_weight_start 降到 args.scl_weight_end。
 
                 返回:
                     model.state_dict(): 训练后的模型权重参数。
-                    epoch_loss: 包含各类损失分量的字典（total, 1, 2, 3, 4, 5, 6）。
+                    epoch_loss: 包含各类损失分量的字典（total, ace, scl, proto_high, proto_low, soft）。
                     acc_val.item(): 最后一个 batch 的准确率。
                     agg_high_protos_label: 收集到的本地高层原型字典，按标签分类。
                     agg_low_protos_label: 收集到的本地底层原型字典，按标签分类。
@@ -594,38 +609,63 @@ class LocalUpdate(object):
         """
         # Set mode to train model
         model.train()
-        epoch_loss = {'total': [], '1': [], '2': [], '3': [],'4':[], '5':[], '6':[]}
+        epoch_loss = {'total': [], 'ace': [], 'scl': [], 'proto_high': [], 'proto_low': [], 'soft': []}
 
-        # Set optimizer for the local updates
+        # Set optimizer for the local updates (确保包含 projector 参数)
         if self.args.optimizer == 'sgd':
-            optimizer = torch.optim.SGD(model.parameters(), lr=self.args.lr,momentum=0.5)
+            optimizer = torch.optim.SGD(model.parameters(), lr=self.args.lr, momentum=0.5)
         elif self.args.optimizer == 'adam':
-            optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr,weight_decay=1e-4)
+            optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr, weight_decay=1e-4)
 
-        # MMD 损失权重（暂时使用固定值 0.01，后续可以从配置文件读取）
-        mmd_weight = getattr(args, 'mmd_gamma', 0.01)
+        # ABBL: 计算动态 scl_weight（余弦退火）
+        if total_rounds is None:
+            total_rounds = getattr(args, 'rounds', 100)
+        scl_weight_start = getattr(args, 'scl_weight_start', 0.1)
+        scl_weight_end = getattr(args, 'scl_weight_end', 0.0)
+        # 余弦退火公式: 0.5 * (start - end) * (1 + cos(pi * current / total)) + end
+        if total_rounds > 0:
+            scl_weight = 0.5 * (scl_weight_start - scl_weight_end) * (1 + math.cos(math.pi * global_round / total_rounds)) + scl_weight_end
+        else:
+            scl_weight = scl_weight_start
 
         for iter in range(self.args.train_ep):
             correct = 0
             total = 0
-            batch_loss = {'total': [], '1': [], '2': [], '3': [],'4':[], '5':[], '6':[]}
+            batch_loss = {'total': [], 'ace': [], 'scl': [], 'proto_high': [], 'proto_low': [], 'soft': []}
             agg_high_protos_label = {}
             agg_low_protos_label = {}
             for batch_idx, (images, label_g) in enumerate(self.trainloader):
                 images, labels = images.to(self.device), label_g.to(self.device)
 
                 model.zero_grad()
-                probs, log_probs, high_protos, low_protos = model(images)
+                # ABBL: 获取 5 个返回值（包括 projected_features）
+                logits, log_probs, high_protos, low_protos, projected_features = model(images)
 
-                # loss1: classification loss
-                loss1 = self.criterion(log_probs, labels)# nn.NLLLoss()
+                # Loss 1 (ABBL): L_ACE - 自适应交叉熵损失
+                # 关键：传入原始 logits，而非 log_probs
+                a_ce_gamma = getattr(args, 'a_ce_gamma', 0.1)
+                loss_ace = logit_adjustment_ce(
+                    logit=logits,  # 原始 logits
+                    target=labels,
+                    sample_per_class=self.pi_sample_per_class,
+                    gamma=a_ce_gamma
+                )
 
-                # loss2: high-level contrastive learning loss between local features and global prototypes
-                # loss3: low-level contrastive learning loss between local features and global prototypes
+                # Loss 2 (ABBL): L_A-SCL - 自适应监督对比学习损失
+                scl_temperature = getattr(args, 'scl_temperature', 0.07)
+                loss_scl = a_scl_loss(
+                    z=projected_features,
+                    y=labels,
+                    temperature=scl_temperature,
+                    sample_per_class=self.pi_sample_per_class
+                )
+
+                # Loss 3 (FedMPS): high-level contrastive learning loss between local features and global prototypes
+                # Loss 4 (FedMPS): low-level contrastive learning loss between local features and global prototypes
                 loss_mysupcon = MySupConLoss(temperature=0.5)
                 if len(global_high_protos) == 0:
-                    loss2 = 0 * loss1
-                    loss3 = 0 * loss1
+                    loss_proto_high = 0 * loss_ace
+                    loss_proto_low = 0 * loss_ace
                 else:
                     global_h_input, global_h_labels = self.hcfit(global_high_protos, high_protos, labels)
                     global_l_input, global_l_labels = self.hcfit(global_low_protos, low_protos, labels)
@@ -634,72 +674,27 @@ class LocalUpdate(object):
                     local_l_input = low_protos
                     local_l_labels = labels
 
-                    loss3 = loss_mysupcon.forward(feature_i=local_l_input, feature_j=global_l_input,
-                                                  label_i=local_l_labels, label_j=global_l_labels)
-                    loss2 = loss_mysupcon.forward(feature_i=local_h_input, feature_j=global_h_input,
-                                                  label_i=local_h_labels, label_j=global_h_labels)
+                    loss_proto_low = loss_mysupcon.forward(feature_i=local_l_input, feature_j=global_l_input,
+                                                          label_i=local_l_labels, label_j=global_l_labels)
+                    loss_proto_high = loss_mysupcon.forward(feature_i=local_h_input, feature_j=global_h_input,
+                                                           label_i=local_h_labels, label_j=global_h_labels)
 
-                # loss4: distillation loss between local soft labels and global soft labels
+                # Loss 5 (FedMPS): distillation loss between local soft labels and global soft labels
                 soft_loss = nn.KLDivLoss(reduction="batchmean")
                 T = args.T
                 if len(global_logits) == 0:
-                    loss4=0*loss1
+                    loss_soft = 0 * loss_ace
                 else:
                     global_probs = []
                     for l in labels:
                         class_prob = global_logits[l.item()]
                         global_probs.append(class_prob)
                     global_probs = torch.stack(global_probs)
-                    loss4 = soft_loss(F.log_softmax(probs / T, dim=1), F.softmax(global_probs / T, dim=1))
+                    # 使用 logits 计算 softmax（而非 probs）
+                    loss_soft = soft_loss(F.log_softmax(logits / T, dim=1), F.softmax(global_probs / T, dim=1))
 
-                # loss5: high-level MMD loss based on RFF
-                # loss6: low-level MMD loss based on RFF
-                # ========== 已注释：MMD损失（loss5和loss6）部分，便于后续切换 ==========
-                # 如需启用MMD损失，取消以下注释并修改总损失计算
-                # if rf_models is not None and global_stats is not None:
-                #     # 计算高层 MMD 损失
-                #     if 'high' in global_stats and 'class_rf_means' in global_stats['high']:
-                #         # 将列表转换为字典，键为类别索引
-                #         global_high_rf_means = {}
-                #         for c, rf_mean in enumerate(global_stats['high']['class_rf_means']):
-                #             if rf_mean is not None and rf_mean.numel() > 0:
-                #                 global_high_rf_means[c] = rf_mean
-                #         loss5 = self.compute_mmd_loss(
-                #             local_features=high_protos,
-                #             local_labels=labels,
-                #             global_rf_means=global_high_rf_means,
-                #             rf_model=rf_models['high']
-                #         )
-                #     else:
-                #         loss5 = torch.tensor(0.0, device=self.device, requires_grad=True)
-                #     
-                #     # 计算低层 MMD 损失
-                #     if 'low' in global_stats and 'class_rf_means' in global_stats['low']:
-                #         # 将列表转换为字典，键为类别索引
-                #         global_low_rf_means = {}
-                #         for c, rf_mean in enumerate(global_stats['low']['class_rf_means']):
-                #             if rf_mean is not None and rf_mean.numel() > 0:
-                #                 global_low_rf_means[c] = rf_mean
-                #         loss6 = self.compute_mmd_loss(
-                #             local_features=low_protos,
-                #             local_labels=labels,
-                #             global_rf_means=global_low_rf_means,
-                #             rf_model=rf_models['low']
-                #         )
-                #     else:
-                #         loss6 = torch.tensor(0.0, device=self.device, requires_grad=True)
-                # else:
-                #     loss5 = torch.tensor(0.0, device=self.device, requires_grad=True)
-                #     loss6 = torch.tensor(0.0, device=self.device, requires_grad=True)
-                
-                # 当前设置：不使用MMD损失，loss5和loss6设为0
-                loss5 = torch.tensor(0.0, device=self.device, requires_grad=True)
-                loss6 = torch.tensor(0.0, device=self.device, requires_grad=True)
-
-                # 原有损失函数（不含MMD损失）
-                loss = loss1 + args.alph * loss2 + args.beta * loss3 + args.gama*loss4  # Note that the weights of the various losses here differ from those in the article
-                # 如需启用MMD损失，使用以下公式替代上面的损失计算：
-                # loss = loss1 + args.alph * loss2 + args.beta * loss3 + args.gama*loss4 + mmd_weight * (loss5 + loss6)
+                # ABBL 集成版本的总损失公式
+                loss = loss_ace + scl_weight * loss_scl + args.alph * loss_proto_high + args.beta * loss_proto_low + args.gama * loss_soft
 
 
                 loss.backward()
@@ -726,28 +721,25 @@ class LocalUpdate(object):
                             loss.item(),
                             acc_val.item()))
                 batch_loss['total'].append(loss.item())
-                batch_loss['1'].append(loss1.item())
-                batch_loss['2'].append(loss2.item())
-                batch_loss['3'].append(loss3.item())
-                batch_loss['4'].append(loss4.item())
-                batch_loss['5'].append(loss5.item())
-                batch_loss['6'].append(loss6.item())
+                batch_loss['ace'].append(loss_ace.item())
+                batch_loss['scl'].append(loss_scl.item())
+                batch_loss['proto_high'].append(loss_proto_high.item())
+                batch_loss['proto_low'].append(loss_proto_low.item())
+                batch_loss['soft'].append(loss_soft.item())
             epoch_loss['total'].append(sum(batch_loss['total']) / len(batch_loss['total']))
-            epoch_loss['1'].append(sum(batch_loss['1']) / len(batch_loss['1']))
-            epoch_loss['2'].append(sum(batch_loss['2']) / len(batch_loss['2']))
-            epoch_loss['3'].append(sum(batch_loss['3']) / len(batch_loss['3']))
-            epoch_loss['4'].append(sum(batch_loss['4']) / len(batch_loss['4']))
-            epoch_loss['5'].append(sum(batch_loss['5']) / len(batch_loss['5']))
-            epoch_loss['6'].append(sum(batch_loss['6']) / len(batch_loss['6']))
+            epoch_loss['ace'].append(sum(batch_loss['ace']) / len(batch_loss['ace']))
+            epoch_loss['scl'].append(sum(batch_loss['scl']) / len(batch_loss['scl']))
+            epoch_loss['proto_high'].append(sum(batch_loss['proto_high']) / len(batch_loss['proto_high']))
+            epoch_loss['proto_low'].append(sum(batch_loss['proto_low']) / len(batch_loss['proto_low']))
+            epoch_loss['soft'].append(sum(batch_loss['soft']) / len(batch_loss['soft']))
             acc_last_epoch = correct / total
 
         epoch_loss['total'] = sum(epoch_loss['total']) / len(epoch_loss['total'])
-        epoch_loss['1'] = sum(epoch_loss['1']) / len(epoch_loss['1'])
-        epoch_loss['2'] = sum(epoch_loss['2']) / len(epoch_loss['2'])
-        epoch_loss['3'] = sum(epoch_loss['3']) / len(epoch_loss['3'])
-        epoch_loss['4'] = sum(epoch_loss['4']) / len(epoch_loss['4'])
-        epoch_loss['5'] = sum(epoch_loss['5']) / len(epoch_loss['5'])
-        epoch_loss['6'] = sum(epoch_loss['6']) / len(epoch_loss['6'])
+        epoch_loss['ace'] = sum(epoch_loss['ace']) / len(epoch_loss['ace'])
+        epoch_loss['scl'] = sum(epoch_loss['scl']) / len(epoch_loss['scl'])
+        epoch_loss['proto_high'] = sum(epoch_loss['proto_high']) / len(epoch_loss['proto_high'])
+        epoch_loss['proto_low'] = sum(epoch_loss['proto_low']) / len(epoch_loss['proto_low'])
+        epoch_loss['soft'] = sum(epoch_loss['soft']) / len(epoch_loss['soft'])
 
         return model.state_dict(), epoch_loss, acc_val.item(), agg_high_protos_label, agg_low_protos_label, acc_last_epoch
 

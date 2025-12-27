@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 # Python version: 3.6
 
+import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from lib.models.resnetcifar import *
 import torchvision.models as models
@@ -15,6 +17,14 @@ class CNNMnist(nn.Module):
         self.conv2_drop = nn.Dropout2d()
         self.fc1 = nn.Linear(int(320/20*args.out_channels), 50)
         self.fc2 = nn.Linear(50, args.num_classes)
+        # Projector for contrastive learning
+        dim = self.fc1.out_features  # 50
+        self.projector = nn.Sequential(
+            nn.Linear(dim, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Linear(256, 128)
+        )
 
     def forward(self, x):
         x = F.relu(F.max_pool2d(self.conv1(x), 2))
@@ -25,8 +35,10 @@ class CNNMnist(nn.Module):
         x1 = F.relu(self.fc1(x))
         x1 = F.normalize(x1, dim=1)
         x = F.dropout(x1, training=self.training)
-        x = self.fc2(x)
-        return x,F.log_softmax(x, dim=1), x1,x_low
+        logits = self.fc2(x)
+        # Project high-level features for contrastive learning
+        projected_features = self.projector(x1)
+        return logits, F.log_softmax(logits, dim=1), x1, x_low, projected_features
 
 
 class CNNFemnist(nn.Module):
@@ -37,6 +49,14 @@ class CNNFemnist(nn.Module):
         self.conv2_drop = nn.Dropout2d()
         self.fc1 = nn.Linear(int(16820/20*args.out_channels), 50)
         self.fc2 = nn.Linear(50, args.num_classes)
+        # Projector for contrastive learning
+        dim = self.fc1.out_features  # 50
+        self.projector = nn.Sequential(
+            nn.Linear(dim, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Linear(256, 128)
+        )
 
     def forward(self, x):
         x = F.relu(F.max_pool2d(self.conv1(x), 2))
@@ -47,8 +67,10 @@ class CNNFemnist(nn.Module):
         x1 = F.relu(self.fc1(x))
         x1 = F.normalize(x1, dim=1)
         x = F.dropout(x1, training=self.training)
-        x = self.fc2(x)
-        return x,F.log_softmax(x, dim=1), x1,x_low
+        logits = self.fc2(x)
+        # Project high-level features for contrastive learning
+        projected_features = self.projector(x1)
+        return logits, F.log_softmax(logits, dim=1), x1, x_low, projected_features
 
 
 class CNNCifar(nn.Module):
@@ -60,6 +82,14 @@ class CNNCifar(nn.Module):
         self.fc0 = nn.Linear(16 * 5 * 5, 120)
         self.fc1 = nn.Linear(120, 84)
         self.fc2 = nn.Linear(84, args.num_classes)
+        # Projector for contrastive learning
+        dim = self.fc1.out_features  # 84
+        self.projector = nn.Sequential(
+            nn.Linear(dim, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Linear(256, 128)
+        )
 
     def forward(self, x):
         x = self.pool(F.relu(self.conv1(x)))
@@ -70,8 +100,10 @@ class CNNCifar(nn.Module):
         x1 = F.relu(self.fc0(x))
         x1 = F.normalize(x1, dim=1)
         x = F.relu(self.fc1(x1))# base encoder
-        x = self.fc2(x)
-        return x,F.log_softmax(x, dim=1), x1,x_low
+        logits = self.fc2(x)
+        # Project high-level features for contrastive learning
+        projected_features = self.projector(x1)
+        return logits, F.log_softmax(logits, dim=1), x1, x_low, projected_features
 
 class CNNFashion_Mnist(nn.Module):
     def __init__(self, args):
@@ -87,6 +119,14 @@ class CNNFashion_Mnist(nn.Module):
             nn.ReLU(),
             nn.MaxPool2d(2))
         self.fc = nn.Linear(7*7*32, 10)
+        # Projector for contrastive learning
+        dim = self.fc.in_features  # 7*7*32 = 1568
+        self.projector = nn.Sequential(
+            nn.Linear(dim, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Linear(256, 128)
+        )
 
     def forward(self, x):
         out = self.layer1(x)
@@ -95,8 +135,10 @@ class CNNFashion_Mnist(nn.Module):
         out = self.layer2(out)
         out = out.view(out.size(0), -1)
         x1 = F.normalize(out, dim=1)
-        x = self.fc(x1)
-        return x,F.log_softmax(x, dim=1), x1, x_low
+        logits = self.fc(x1)
+        # Project high-level features for contrastive learning
+        projected_features = self.projector(x1)
+        return logits, F.log_softmax(logits, dim=1), x1, x_low, projected_features
 
 
 class ResNetWithFeatures(nn.Module):
@@ -123,6 +165,14 @@ class ResNetWithFeatures(nn.Module):
         self.layer4 = net.layer4  # High-level feature
         self.avgpool = net.avgpool
         self.fc = nn.Linear(net.fc.in_features, num_classes)
+        # Projector for contrastive learning
+        dim = net.fc.in_features  # 512 for ResNet18/34, 2048 for ResNet50
+        self.projector = nn.Sequential(
+            nn.Linear(dim, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Linear(256, 128)
+        )
 
     def forward(self, x):
         x = self.stem(x)
@@ -138,8 +188,10 @@ class ResNetWithFeatures(nn.Module):
         pooled = torch.flatten(pooled, 1)
         x_high = F.normalize(pooled, dim=1)
         logits = self.fc(pooled)
+        # Project high-level features for contrastive learning
+        projected_features = self.projector(x_high)
 
-        return logits, F.log_softmax(logits, dim=1), x_high, x_low
+        return logits, F.log_softmax(logits, dim=1), x_high, x_low, projected_features
 
 
 class ModelCT(nn.Module):

@@ -496,7 +496,21 @@ def FedProto_taskheter(args, train_dataset, test_dataset, user_groups, user_grou
 
 
 def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local_model_list, classes_list,summary_writer,logger):
-
+    """
+    FedMPS 主训练函数（集成 ABBL）
+    
+    注意：确保 local_model_list 中的模型已经在主程序中正确移动到 GPU（通常在模型构建时完成）。
+    """
+    
+    # ABBL: 初始化检查 - 确保所有本地模型已正确移动到设备
+    for idx, model in enumerate(local_model_list):
+        model_device = next(model.parameters()).device
+        expected_device = torch.device(args.device)
+        if model_device != expected_device:
+            print(f'Warning: Model {idx} is on {model_device}, expected {expected_device}, moving it now...')
+            logger.warning(f'Model {idx} is on {model_device}, expected {expected_device}, moving it now...')
+            model.to(args.device)
+    
     # global model: shares the same structure as the output layer of each local model
     global_model = GlobalFedmps(args)
     global_model.to(args.device)
@@ -608,16 +622,23 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
 
         acc_list_train = []
         loss_list_train = []
+        loss_ace_list = []  # ABBL: Loss_ACE (L_ACE)
+        loss_scl_list = []  # ABBL: Loss_SCL (L_A-SCL)
         for idx in idxs_users:
             # local model updating
             local_model = LocalUpdate(args=args, dataset=train_dataset, idxs=user_groups[idx])
+            # ABBL: 传递 total_rounds 参数用于计算余弦退火权重
             w, loss, acc, high_protos, low_protos, idx_acc = local_model.update_weights_fedmps(
                 args, idx, global_high_protos, global_low_protos, global_logits, 
                 model=copy.deepcopy(local_model_list[idx]), global_round=round,
+                total_rounds=args.rounds,  # ABBL: 传递总轮数用于余弦退火
                 rf_models=rf_models, global_stats=global_stats
             )
             acc_list_train.append(idx_acc)
             loss_list_train.append(loss['total'])
+            # ABBL: 记录 L_ACE 和 L_A-SCL 损失
+            loss_ace_list.append(loss['ace'])
+            loss_scl_list.append(loss['scl'])
             agg_high_protos = agg_func(high_protos)
             agg_low_protos = agg_func(low_protos)
             local_weights.append(copy.deepcopy(w))
@@ -768,6 +789,15 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
             train_dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
             # begin training and output global logits
             global_logits = train_global_proto_model(global_model, train_dataloader)
+
+        # ABBL: 记录训练损失（包括 L_ACE 和 L_A-SCL）
+        print('| ROUND: {} | Train Loss - Total: {:.5f}, L_ACE: {:.5f}, L_A-SCL: {:.5f}'.format(
+            round, np.mean(loss_list_train), np.mean(loss_ace_list), np.mean(loss_scl_list)))
+        logger.info('| ROUND: {} | Train Loss - Total: {:.5f}, L_ACE: {:.5f}, L_A-SCL: {:.5f}'.format(
+            round, np.mean(loss_list_train), np.mean(loss_ace_list), np.mean(loss_scl_list)))
+        summary_writer.add_scalar('scalar/Train_Total_Loss', np.mean(loss_list_train), round)
+        summary_writer.add_scalar('scalar/Train_Loss_ACE', np.mean(loss_ace_list), round)
+        summary_writer.add_scalar('scalar/Train_Loss_SCL', np.mean(loss_scl_list), round)
 
         # test
         acc_list_l, loss_list_l, acc_list_g, loss_list, loss_total_list = test_inference_new_het_lt(args,local_model_list,test_dataset,classes_list,user_groups_lt,global_high_protos)

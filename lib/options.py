@@ -45,7 +45,7 @@ def args_parser():
                         of dataset")
     parser.add_argument('--num_classes', type=int, default=10, help="number \
                         of classes")
-    parser.add_argument('--gpu', default=0, help="To use cuda, set \
+    parser.add_argument('--gpu', type=int, default=0, help="To use cuda, set \
                         to a specific GPU ID. Default set to use CPU.")
     parser.add_argument('--optimizer', type=str, default='sgd', help="type \
                         of optimizer")
@@ -118,6 +118,18 @@ def args_parser():
                         help='Number of epochs for SAFS global model fine-tuning (default: 5)')
     parser.add_argument('--safs_finetune_batch_size', type=int, default=32, 
                         help='Batch size for SAFS global model fine-tuning (default: 32)')
+
+    # for ABBL (Adaptive Bi-Branch Learning) - SFD loss functions
+    parser.add_argument('--beta_pi', type=float, default=1.0,
+                        help='SFD parameter: coefficient for computing smoothed class distribution π in L_ACE (default: 1.0)')
+    parser.add_argument('--a_ce_gamma', type=float, default=0.1,
+                        help='SFD parameter: logit adjustment strength in L_ACE loss (default: 0.1)')
+    parser.add_argument('--scl_weight_start', type=float, default=0.1,
+                        help='Initial weight for L_A-SCL contrastive loss (default: 0.1)')
+    parser.add_argument('--scl_weight_end', type=float, default=0.0,
+                        help='Final weight for L_A-SCL contrastive loss (cosine annealing target, default: 0.0)')
+    parser.add_argument('--scl_temperature', type=float, default=0.07,
+                        help='Temperature coefficient for L_A-SCL contrastive learning (default: 0.07). Note: different from --temperature which is for FedMPS contrastive loss (default: 0.5)')
 
     args = parser.parse_args()
     return args
