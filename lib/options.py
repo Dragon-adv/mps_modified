@@ -41,6 +41,8 @@ def args_parser():
 
     # other arguments
     parser.add_argument('--data_dir', type=str, default='../data/', help="directory of dataset")
+    parser.add_argument('--log_dir', type=str, default=None, 
+                        help="custom log directory path. If None, will auto-generate based on algorithm, dataset, and timestamp")
     parser.add_argument('--dataset', type=str, default='mnist', help="name \
                         of dataset")
     parser.add_argument('--num_classes', type=int, default=10, help="number \

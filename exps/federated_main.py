@@ -496,7 +496,7 @@ def FedProto_taskheter(args, train_dataset, test_dataset, user_groups, user_grou
     logger.info('| BEST ROUND: {} | For all users , mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(best_round_w ,best_acc_w ,best_std_w ))
 
 
-def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local_model_list, classes_list,summary_writer,logger):
+def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local_model_list, classes_list,summary_writer,logger,logdir):
     """
     FedMPS 主训练函数（集成 ABBL）
     
@@ -618,6 +618,34 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
     # Initialize global_stats to store the last round's statistics
     global_stats = None
     
+    # ========== 保存数据分布元数据 (Metadata) ==========
+    # 在训练开始前,收集并保存每个客户端的 pi_sample_per_class 和 classes_list
+    print('[Before Training] Saving data distribution metadata...')
+    logger.info('[Before Training] Saving data distribution metadata...')
+    
+    # 收集每个客户端的 pi_sample_per_class
+    client_pi_samples = {}
+    for idx in idxs_users:
+        local_model = LocalUpdate(args=args, dataset=train_dataset, idxs=user_groups[idx])
+        # 将 pi_sample_per_class 转换为 CPU 并脱离计算图
+        pi_cpu = local_model.pi_sample_per_class.cpu().detach().clone()
+        client_pi_samples[idx] = pi_cpu.numpy()  # 转换为 numpy 数组便于保存
+    
+    # 保存元数据到 pickle 文件
+    metadata_dict = {
+        'client_pi_sample_per_class': client_pi_samples,  # 每个客户端的平滑类别分布
+        'classes_list': classes_list,  # 客户端 ID 与其拥有类别的映射表
+        'num_users': args.num_users,
+        'num_classes': args.num_classes,
+        'beta_pi': getattr(args, 'beta_pi', 0.5)
+    }
+    
+    metadata_path = os.path.join(logdir, 'data_distribution_metadata.pkl')
+    with open(metadata_path, 'wb') as f:
+        pickle.dump(metadata_dict, f)
+    print(f'Saved data distribution metadata to {metadata_path}')
+    logger.info(f'Saved data distribution metadata to {metadata_path}')
+    
     for round in tqdm(range(args.rounds)):
         local_weights, local_losses, local_high_protos, local_low_protos = [], [], {}, {}
         print(f'\n | Global Training Round : {round + 1} |\n')
@@ -626,6 +654,9 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
         loss_list_train = []
         loss_ace_list = []  # ABBL: Loss_ACE (L_ACE)
         loss_scl_list = []  # ABBL: Loss_SCL (L_A-SCL)
+        loss_proto_high_list = []  # FedMPS: Loss_proto_high (L_proto_high)
+        loss_proto_low_list = []   # FedMPS: Loss_proto_low (L_proto_low)
+        loss_soft_list = []        # FedMPS: Loss_soft (L_soft)
         
         # ABBL: 计算当前轮的 scl_weight（用于日志记录）
         scl_weight_start = getattr(args, 'scl_weight_start', 1.0)
@@ -646,9 +677,12 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
             )
             acc_list_train.append(idx_acc)
             loss_list_train.append(loss['total'])
-            # ABBL: 记录 L_ACE 和 L_A-SCL 损失
+            # ABBL: 记录所有损失分量
             loss_ace_list.append(loss['ace'])
             loss_scl_list.append(loss['scl'])
+            loss_proto_high_list.append(loss['proto_high'])
+            loss_proto_low_list.append(loss['proto_low'])
+            loss_soft_list.append(loss['soft'])
             agg_high_protos = agg_func(high_protos)
             agg_low_protos = agg_func(low_protos)
             local_weights.append(copy.deepcopy(w))
@@ -783,7 +817,10 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
                 args,
                 global_model,
                 class_syn_datasets,
-                global_high_protos  # 注意：FedMPS主要使用 high_protos 进行分类层训练
+                global_high_protos,  # 注意：FedMPS主要使用 high_protos 进行分类层训练
+                summary_writer=summary_writer,
+                logger=logger,
+                round=round
             )
             
             print(f'[Round {round+1}] Global model fine-tuned using SAFS synthetic features.')
@@ -800,26 +837,81 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
             # begin training and output global logits
             global_logits = train_global_proto_model(global_model, train_dataloader)
 
-        # ABBL: 记录训练损失（包括 L_ACE 和 L_A-SCL）以及权重退火
-        print('| ROUND: {} | Train Loss - Total: {:.5f}, L_ACE: {:.5f}, L_A-SCL: {:.5f}, SCL_Weight: {:.5f}'.format(
-            round, np.mean(loss_list_train), np.mean(loss_ace_list), np.mean(loss_scl_list), scl_weight))
-        logger.info('| ROUND: {} | Train Loss - Total: {:.5f}, L_ACE: {:.5f}, L_A-SCL: {:.5f}, SCL_Weight: {:.5f}'.format(
-            round, np.mean(loss_list_train), np.mean(loss_ace_list), np.mean(loss_scl_list), scl_weight))
+        # ABBL: 记录训练损失（包括所有损失分量）以及权重退火
+        print('| ROUND: {} | Train Loss - Total: {:.5f}, L_ACE: {:.5f}, L_A-SCL: {:.5f}, L_proto_high: {:.5f}, L_proto_low: {:.5f}, L_soft: {:.5f}, SCL_Weight: {:.5f}'.format(
+            round, np.mean(loss_list_train), np.mean(loss_ace_list), np.mean(loss_scl_list), 
+            np.mean(loss_proto_high_list), np.mean(loss_proto_low_list), np.mean(loss_soft_list), scl_weight))
+        logger.info('| ROUND: {} | Train Loss - Total: {:.5f}, L_ACE: {:.5f}, L_A-SCL: {:.5f}, L_proto_high: {:.5f}, L_proto_low: {:.5f}, L_soft: {:.5f}, SCL_Weight: {:.5f}'.format(
+            round, np.mean(loss_list_train), np.mean(loss_ace_list), np.mean(loss_scl_list),
+            np.mean(loss_proto_high_list), np.mean(loss_proto_low_list), np.mean(loss_soft_list), scl_weight))
         summary_writer.add_scalar('scalar/Train_Total_Loss', np.mean(loss_list_train), round)
         summary_writer.add_scalar('scalar/Train_Loss_ACE', np.mean(loss_ace_list), round)
         summary_writer.add_scalar('scalar/Train_Loss_SCL', np.mean(loss_scl_list), round)
+        summary_writer.add_scalar('scalar/Train_Loss_Proto_High', np.mean(loss_proto_high_list), round)
+        summary_writer.add_scalar('scalar/Train_Loss_Proto_Low', np.mean(loss_proto_low_list), round)
+        summary_writer.add_scalar('scalar/Train_Loss_Soft', np.mean(loss_soft_list), round)
         summary_writer.add_scalar('scalar/SCL_Weight', scl_weight, round)  # ABBL: 记录权重退火变化
 
         # test
         acc_list_l, loss_list_l, acc_list_g, loss_list, loss_total_list = test_inference_new_het_lt(args,local_model_list,test_dataset,classes_list,user_groups_lt,global_high_protos)
 
-        print('| ROUND: {} | For all users (w/o protos), mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round, np.mean(acc_list_l), np.std(acc_list_l)))
-        logger.info('| ROUND: {} | For all users (w/o protos), mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round, np.mean(acc_list_l), np.std(acc_list_l)))
+        # 记录每个客户端的准确率（细粒度性能记录）
+        for idx in range(args.num_users):
+            summary_writer.add_scalar(f'scalar/Client_{idx}_Test_Acc_wo_Protos', acc_list_l[idx], round)
+            if idx < len(acc_list_g):
+                summary_writer.add_scalar(f'scalar/Client_{idx}_Test_Acc_w_Protos', acc_list_g[idx], round)
+
+        # 计算并记录标准差（用于评估公平性）
+        std_acc_wo = np.std(acc_list_l)
+        std_acc_w = np.std(acc_list_g) if len(acc_list_g) > 0 else 0.0
+        summary_writer.add_scalar('scalar/Total_Test_Std_Accuracy_wo_Protos', std_acc_wo, round)
+        summary_writer.add_scalar('scalar/Total_Test_Std_Accuracy_w_Protos', std_acc_w, round)
+
+        print('| ROUND: {} | For all users (w/o protos), mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round, np.mean(acc_list_l), std_acc_wo))
+        logger.info('| ROUND: {} | For all users (w/o protos), mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round, np.mean(acc_list_l), std_acc_wo))
         summary_writer.add_scalar('scalar/Total_Test_Avg_Accuracy', np.mean(acc_list_l), round)
 
-        print('| ROUND: {} | For all users (with protos), mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round, np.mean(acc_list_g), np.std(acc_list_g)))
-        logger.info('| ROUND: {} | For all users (with protos), mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round, np.mean(acc_list_g), np.std(acc_list_g)))
+        print('| ROUND: {} | For all users (with protos), mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round, np.mean(acc_list_g), std_acc_w))
+        logger.info('| ROUND: {} | For all users (with protos), mean of test acc is {:.5f}, std of test acc is {:.5f}'.format(round, np.mean(acc_list_g), std_acc_w))
         summary_writer.add_scalar('scalar/Total_Test_Avg_Accuracy_wp', np.mean(acc_list_g), round)
+
+        # ========== 原型稳定性分析 (Prototype Data) ==========
+        # 每隔 10 个 Round,保存当前的 global_high_protos 和 global_low_protos
+        if (round + 1) % 10 == 0:
+            print(f'[Round {round+1}] Saving prototype data for stability analysis...')
+            logger.info(f'[Round {round+1}] Saving prototype data for stability analysis...')
+            
+            # 将原型转换为 CPU 并脱离计算图
+            proto_data = {
+                'round': round + 1,
+                'global_high_protos': {},
+                'global_low_protos': {}
+            }
+            
+            # 处理 global_high_protos
+            # 注意: proto_aggregation 返回的格式是 {class_idx: [proto_tensor]}, 列表只包含一个张量
+            for class_idx, proto_list in global_high_protos.items():
+                if isinstance(proto_list, list) and len(proto_list) > 0:
+                    # 列表通常只包含一个张量,直接取第一个元素
+                    proto_tensor = proto_list[0] if isinstance(proto_list[0], torch.Tensor) else torch.tensor(proto_list[0])
+                    proto_data['global_high_protos'][class_idx] = proto_tensor.cpu().detach().numpy()
+                elif isinstance(proto_list, torch.Tensor):
+                    proto_data['global_high_protos'][class_idx] = proto_list.cpu().detach().numpy()
+            
+            # 处理 global_low_protos
+            for class_idx, proto_list in global_low_protos.items():
+                if isinstance(proto_list, list) and len(proto_list) > 0:
+                    proto_tensor = proto_list[0] if isinstance(proto_list[0], torch.Tensor) else torch.tensor(proto_list[0])
+                    proto_data['global_low_protos'][class_idx] = proto_tensor.cpu().detach().numpy()
+                elif isinstance(proto_list, torch.Tensor):
+                    proto_data['global_low_protos'][class_idx] = proto_list.cpu().detach().numpy()
+            
+            # 保存到 pickle 文件
+            proto_save_path = os.path.join(logdir, f'prototypes_round_{round+1}.pkl')
+            with open(proto_save_path, 'wb') as f:
+                pickle.dump(proto_data, f)
+            print(f'Saved prototype data to {proto_save_path}')
+            logger.info(f'Saved prototype data to {proto_save_path}')
 
         if np.mean(acc_list_l) > best_acc:
             best_acc = np.mean(acc_list_l)
@@ -888,7 +980,11 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
 if __name__ == '__main__':
     args = args_parser()
     exp_details(args)
-    logdir = os.path.join('../newresults', args.alg, str(datetime.datetime.now().strftime("%Y-%m-%d/%H.%M.%S"))+'_'+args.dataset+'_n'+str(args.ways))
+    # 如果用户指定了自定义 logdir,使用它;否则自动生成
+    if args.log_dir is not None:
+        logdir = args.log_dir
+    else:
+        logdir = os.path.join('../newresults', args.alg, str(datetime.datetime.now().strftime("%Y-%m-%d/%H.%M.%S"))+'_'+args.dataset+'_n'+str(args.ways))
     mkdirs(logdir)
 
     for handler in logging.root.handlers[:]:
@@ -1022,7 +1118,7 @@ if __name__ == '__main__':
     elif args.alg=='fedproto':
         FedProto_taskheter(args, train_dataset, test_dataset, user_groups, user_groups_lt, local_model_list, classes_list, summary_writer,logger,logdir)
     elif args.alg=='ours':#FedMPS
-        FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local_model_list, classes_list,summary_writer,logger)
+        FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local_model_list, classes_list,summary_writer,logger,logdir)
 
 
 

@@ -1570,7 +1570,7 @@ def train_global_proto_model(global_model,train_dataloder):
     return class_logits
 
 
-def fine_tune_global_model_safs(args, global_model, synthetic_data_list, global_protos):
+def fine_tune_global_model_safs(args, global_model, synthetic_data_list, global_protos, summary_writer=None, logger=None, round=None):
     """
     利用 SAFS 合成特征微调全局模型，并生成全局 logits。
     
@@ -1581,6 +1581,9 @@ def fine_tune_global_model_safs(args, global_model, synthetic_data_list, global_
         global_model: GlobalFedmps 实例
         synthetic_data_list: feature_synthesis 返回的列表，包含 {'class_index', 'synthetic_features'}
         global_protos: 全局原型字典 {class_index: [proto_tensor]}，用于生成最终的 global_logits
+        summary_writer: TensorBoard SummaryWriter 实例，用于记录指标（可选）
+        logger: Logger 实例，用于记录日志（可选）
+        round: 当前轮次，用于记录指标（可选）
     
     Returns:
         global_logits: 字典 {class_index: logit_tensor}，用于客户端蒸馏
@@ -1655,6 +1658,14 @@ def fine_tune_global_model_safs(args, global_model, synthetic_data_list, global_
         acc = num_correct / num_samples if num_samples > 0 else 0.0
         avg_loss = epoch_loss / num_batches if num_batches > 0 else 0.0
         print(f"SAFS fine-tuning epoch {epoch+1}/{epochs}, train acc={acc:.4f}, loss={avg_loss:.4f}")
+        
+        # 记录 SAFS 微调指标（如果提供了 summary_writer 和 round）
+        if summary_writer is not None and round is not None:
+            summary_writer.add_scalar('scalar/SAFS_FineTune_Loss', avg_loss, round * epochs + epoch)
+            summary_writer.add_scalar('scalar/SAFS_FineTune_Acc', acc, round * epochs + epoch)
+        
+        if logger is not None:
+            logger.info(f"SAFS fine-tuning epoch {epoch+1}/{epochs}, train acc={acc:.4f}, loss={avg_loss:.4f}")
     
     # ========== 生成 Global Logits ==========
     # 微调完成后，将模型设为 eval() 模式
