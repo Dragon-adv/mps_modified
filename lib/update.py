@@ -876,7 +876,8 @@ class LocalUpdate(object):
         
         参数:
             projected_features: torch.Tensor, shape (batch_size, feature_dim)
-                投影后的特征向量（已归一化），通常来自 projector 的输出。
+                投影后的特征向量（已在模型 forward 中归一化），通常来自 projector 的输出。
+                注意：该函数不再进行归一化，直接使用已归一化的特征。
             labels: torch.Tensor, shape (batch_size,)
                 样本对应的标签，每个元素是类别索引。
             n_k: torch.Tensor, shape (num_classes,)
@@ -894,16 +895,18 @@ class LocalUpdate(object):
         # 获取温度参数
         temperature = getattr(args, 'scl_temperature', 0.07)
         
-        # 1. 确保特征已归一化
-        z = F.normalize(projected_features, p=2, dim=1)  # shape: (batch_size, feature_dim)
+        # 1. projected_features 已经在模型中被归一化，直接使用
+        z = projected_features  # shape: (batch_size, feature_dim)
         
         # 2. 计算相似度矩阵 (z_i · z_j / temperature)
         similarity_matrix = (z @ z.T) / temperature  # shape: (batch_size, batch_size)
         
         # 3. 获取正样本对掩码矩阵（相同标签的位置为 1）
         labels_equal = labels.unsqueeze(0) == labels.unsqueeze(1)  # shape: (batch_size, batch_size)
-        positive_mask = labels_equal.float()  # 正样本掩码
-        
+        # positive_mask = labels_equal.float()  # 正样本掩码
+        # 确保对比学习只拉近不同的同类样本，排除自身对比
+        positive_mask = labels_equal.float() * (1 - torch.eye(z.shape[0], device=z.device))
+
         # 4. 计算 Delta (基于类别频率)
         # delta_k 是每个类别的频率比值或 log 计数
         # 这里使用 log(n_k) 作为调整项
