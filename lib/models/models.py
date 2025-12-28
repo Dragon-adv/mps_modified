@@ -30,24 +30,31 @@ class CNNMnist(nn.Module):
         # 1. 低级特征阶段
         feat_low_raw = F.relu(F.max_pool2d(self.conv1(x), 2))
         feat_low_flat = feat_low_raw.view(-1, feat_low_raw.shape[1] * feat_low_raw.shape[2] * feat_low_raw.shape[3])
+        # 保存未归一化版本用于原型聚合
+        low_level_features_raw = feat_low_flat
+        # 归一化版本用于后续处理（如果需要）
         low_level_features = F.normalize(feat_low_flat, dim=1)
         
         # 2. 高级特征阶段
         feat_high_raw = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(feat_low_raw)), 2))
         feat_high_flat = feat_high_raw.view(-1, feat_high_raw.shape[1]*feat_high_raw.shape[2]*feat_high_raw.shape[3])
         feat_high_encoded = F.relu(self.fc1(feat_high_flat))
+        # 保存未归一化版本用于原型聚合
+        high_level_features_raw = feat_high_encoded
+        # 归一化版本用于分类器和投影器
         high_level_features = F.normalize(feat_high_encoded, dim=1)
         
-        # 3. 分类与投影阶段
+        # 3. 分类与投影阶段（使用归一化版本）
         feat_for_classifier = F.dropout(high_level_features, training=self.training)
         logits = self.fc2(feat_for_classifier)
         log_probs = F.log_softmax(logits, dim=1)
         
-        # 对比学习投影
+        # 对比学习投影（使用归一化版本）
         proj_output = self.projector(high_level_features)
         projected_features = F.normalize(proj_output, dim=1)
         
-        return logits, log_probs, high_level_features, low_level_features, projected_features
+        # 返回未归一化的特征用于原型聚合
+        return logits, log_probs, high_level_features_raw, low_level_features_raw, projected_features
 
 
 class CNNFemnist(nn.Module):
@@ -71,24 +78,31 @@ class CNNFemnist(nn.Module):
         # 1. 低级特征阶段
         feat_low_raw = F.relu(F.max_pool2d(self.conv1(x), 2))
         feat_low_flat = feat_low_raw.view(-1, feat_low_raw.shape[1] * feat_low_raw.shape[2] * feat_low_raw.shape[3])
+        # 保存未归一化版本用于原型聚合
+        low_level_features_raw = feat_low_flat
+        # 归一化版本用于后续处理（如果需要）
         low_level_features = F.normalize(feat_low_flat, dim=1)
         
         # 2. 高级特征阶段
         feat_high_raw = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(feat_low_raw)), 2))
         feat_high_flat = feat_high_raw.view(-1, feat_high_raw.shape[1]*feat_high_raw.shape[2]*feat_high_raw.shape[3])
         feat_high_encoded = F.relu(self.fc1(feat_high_flat))
+        # 保存未归一化版本用于原型聚合
+        high_level_features_raw = feat_high_encoded
+        # 归一化版本用于分类器和投影器
         high_level_features = F.normalize(feat_high_encoded, dim=1)
         
-        # 3. 分类与投影阶段
+        # 3. 分类与投影阶段（使用归一化版本）
         feat_for_classifier = F.dropout(high_level_features, training=self.training)
         logits = self.fc2(feat_for_classifier)
         log_probs = F.log_softmax(logits, dim=1)
         
-        # 对比学习投影
+        # 对比学习投影（使用归一化版本）
         proj_output = self.projector(high_level_features)
         projected_features = F.normalize(proj_output, dim=1)
         
-        return logits, log_probs, high_level_features, low_level_features, projected_features
+        # 返回未归一化的特征用于原型聚合
+        return logits, log_probs, high_level_features_raw, low_level_features_raw, projected_features
 
 
 class CNNCifar(nn.Module):
@@ -114,23 +128,30 @@ class CNNCifar(nn.Module):
         feat_low_raw = self.pool(F.relu(self.conv1(x)))
         feat_low_raw = self.pool(F.relu(self.conv2(feat_low_raw)))
         feat_low_flat = feat_low_raw.view(-1, feat_low_raw.shape[1] * feat_low_raw.shape[2] * feat_low_raw.shape[3])
+        # 保存未归一化版本用于原型聚合
+        low_level_features_raw = feat_low_flat
+        # 归一化版本用于后续处理（如果需要）
         low_level_features = F.normalize(feat_low_flat, dim=1)
         
         # 2. 高级特征阶段
         feat_high_flat = feat_low_raw.view(-1, 16 * 5 * 5)
         feat_high_encoded = F.relu(self.fc0(feat_high_flat))
+        # 保存未归一化版本用于原型聚合
+        high_level_features_raw = feat_high_encoded
+        # 归一化版本用于分类器和投影器
         high_level_features = F.normalize(feat_high_encoded, dim=1)
         
-        # 3. 分类与投影阶段
+        # 3. 分类与投影阶段（使用归一化版本）
         feat_for_classifier = F.relu(self.fc1(high_level_features))  # base encoder
         logits = self.fc2(feat_for_classifier)
         log_probs = F.log_softmax(logits, dim=1)
         
-        # 对比学习投影
+        # 对比学习投影（使用归一化版本）
         proj_output = self.projector(high_level_features)
         projected_features = F.normalize(proj_output, dim=1)
         
-        return logits, log_probs, high_level_features, low_level_features, projected_features
+        # 返回未归一化的特征用于原型聚合
+        return logits, log_probs, high_level_features_raw, low_level_features_raw, projected_features
 
 class CNNFashion_Mnist(nn.Module):
     def __init__(self, args):
@@ -159,22 +180,29 @@ class CNNFashion_Mnist(nn.Module):
         # 1. 低级特征阶段
         feat_low_raw = self.layer1(x)
         feat_low_flat = feat_low_raw.view(-1, feat_low_raw.shape[1] * feat_low_raw.shape[2] * feat_low_raw.shape[3])
+        # 保存未归一化版本用于原型聚合
+        low_level_features_raw = feat_low_flat
+        # 归一化版本用于后续处理（如果需要）
         low_level_features = F.normalize(feat_low_flat, dim=1)
         
         # 2. 高级特征阶段
         feat_high_raw = self.layer2(feat_low_raw)
         feat_high_flat = feat_high_raw.view(feat_high_raw.size(0), -1)
+        # 保存未归一化版本用于原型聚合
+        high_level_features_raw = feat_high_flat
+        # 归一化版本用于分类器和投影器
         high_level_features = F.normalize(feat_high_flat, dim=1)
         
-        # 3. 分类与投影阶段
+        # 3. 分类与投影阶段（使用归一化版本）
         logits = self.fc(high_level_features)
         log_probs = F.log_softmax(logits, dim=1)
         
-        # 对比学习投影
+        # 对比学习投影（使用归一化版本）
         proj_output = self.projector(high_level_features)
         projected_features = F.normalize(proj_output, dim=1)
         
-        return logits, log_probs, high_level_features, low_level_features, projected_features
+        # 返回未归一化的特征用于原型聚合
+        return logits, log_probs, high_level_features_raw, low_level_features_raw, projected_features
 
 
 class ResNetWithFeatures(nn.Module):
@@ -215,6 +243,9 @@ class ResNetWithFeatures(nn.Module):
         x = self.stem(x)
         feat_low_raw = self.layer1(x)  # Low-level feature
         feat_low_flat = feat_low_raw.view(-1, feat_low_raw.shape[1] * feat_low_raw.shape[2] * feat_low_raw.shape[3])
+        # 保存未归一化版本用于原型聚合
+        low_level_features_raw = feat_low_flat
+        # 归一化版本用于后续处理（如果需要）
         low_level_features = F.normalize(feat_low_flat, dim=1)
         
         # 2. 高级特征阶段
@@ -223,17 +254,21 @@ class ResNetWithFeatures(nn.Module):
         feat_high_raw = self.layer4(out)  # High-level feature (bs,512,7,7)
         pooled = self.avgpool(feat_high_raw)
         feat_high_flat = torch.flatten(pooled, 1)
+        # 保存未归一化版本用于原型聚合
+        high_level_features_raw = feat_high_flat
+        # 归一化版本用于分类器和投影器
         high_level_features = F.normalize(feat_high_flat, dim=1)
         
-        # 3. 分类与投影阶段
-        logits = self.fc(feat_high_flat)
+        # 3. 分类与投影阶段（使用归一化版本）
+        logits = self.fc(feat_high_flat)  # 注意：fc使用未归一化的feat_high_flat
         log_probs = F.log_softmax(logits, dim=1)
         
-        # 对比学习投影
+        # 对比学习投影（使用归一化版本）
         proj_output = self.projector(high_level_features)
         projected_features = F.normalize(proj_output, dim=1)
         
-        return logits, log_probs, high_level_features, low_level_features, projected_features
+        # 返回未归一化的特征用于原型聚合
+        return logits, log_probs, high_level_features_raw, low_level_features_raw, projected_features
 
 
 class ModelCT(nn.Module):
@@ -270,23 +305,30 @@ class ModelCT(nn.Module):
         # 1. 低级特征阶段
         feat_low_raw = self.features(x)
         feat_low_flat = feat_low_raw.squeeze()
+        # 保存未归一化版本用于原型聚合
+        low_level_features_raw = feat_low_flat
+        # 归一化版本用于后续处理（如果需要）
         low_level_features = F.normalize(feat_low_flat, dim=1)
         
         # 2. 高级特征阶段
         feat_high_encoded = self.l1(feat_low_flat)
         feat_high_encoded = F.relu(feat_high_encoded)
+        # 保存未归一化版本用于原型聚合
+        high_level_features_raw = feat_high_encoded
+        # 归一化版本用于分类器和投影器
         high_level_features = F.normalize(feat_high_encoded, dim=1)
         
-        # 3. 分类与投影阶段
+        # 3. 分类与投影阶段（使用归一化版本）
         feat_for_classifier = self.l2(high_level_features)
         logits = self.l3(feat_for_classifier)
         log_probs = F.log_softmax(logits, dim=1)
         
-        # 对比学习投影（使用高级特征作为输入）
+        # 对比学习投影（使用归一化版本）
         proj_output = self.projector(high_level_features)
         projected_features = F.normalize(proj_output, dim=1)
         
-        return logits, log_probs, high_level_features, low_level_features, projected_features
+        # 返回未归一化的特征用于原型聚合
+        return logits, log_probs, high_level_features_raw, low_level_features_raw, projected_features
 
 class GlobalFedmps(nn.Module):
     def __init__(self, args):

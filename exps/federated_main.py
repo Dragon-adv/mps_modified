@@ -979,6 +979,14 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
 
 if __name__ == '__main__':
     args = args_parser()
+
+    import secrets
+    # 如果种子为默认值，自动生成随机种子
+    if args.seed == 1234:  # 默认值
+        args.seed = secrets.randbelow(2**31)
+    if args.rf_seed == 42:  # 默认值
+        args.rf_seed = secrets.randbelow(2**31)
+        
     exp_details(args)
     # 如果用户指定了自定义 logdir,使用它;否则自动生成
     if args.log_dir is not None:

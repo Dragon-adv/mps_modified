@@ -388,8 +388,10 @@ class LocalUpdate(object):
                     global_h_input, global_h_labels = self.hcall(global_protos)
                     global_h_input = global_h_input.to(self.device)
                     global_h_labels = global_h_labels.to(self.device)
-                    local_h_input = protos  # (bs,50)
+                    # 统一归一化：本地特征和全局原型都在对比学习前归一化
+                    local_h_input = F.normalize(protos, dim=1)  # (bs,50)
                     local_h_labels = labels  # (bs,)
+                    global_h_input = F.normalize(global_h_input, dim=1)
                     loss2 = loss_mysupcon.forward(feature_i=local_h_input, feature_j=global_h_input,
                                                   label_i=local_h_labels,
                                                   label_j=global_h_labels)
@@ -673,10 +675,17 @@ class LocalUpdate(object):
                 else:
                     global_h_input, global_h_labels = self.hcfit(global_high_protos, high_protos, labels)
                     global_l_input, global_l_labels = self.hcfit(global_low_protos, low_protos, labels)
-                    local_h_input = high_protos
+                    
+                    # 统一归一化：本地特征和全局原型都在对比学习前归一化
+                    # 这样保证对比学习时输入归一化状态一致
+                    local_h_input = F.normalize(high_protos, dim=1)
                     local_h_labels = labels
-                    local_l_input = low_protos
+                    local_l_input = F.normalize(low_protos, dim=1)
                     local_l_labels = labels
+                    
+                    # 全局原型也需要归一化（因为它们是未归一化特征的均值）
+                    global_h_input = F.normalize(global_h_input, dim=1)
+                    global_l_input = F.normalize(global_l_input, dim=1)
 
                     loss_proto_low = loss_mysupcon.forward(feature_i=local_l_input, feature_j=global_l_input,
                                                           label_i=local_l_labels, label_j=global_l_labels)
@@ -1022,14 +1031,18 @@ class LocalUpdate(object):
                 ys.append(labels_1d.cpu())
 
                 # 根据 stats_level 选择性地计算和存储特征
+                # 注意：RFF模型期望归一化的输入（如果之前是在归一化特征上训练的）
+                # 为了保持一致性，对特征进行归一化后再计算RFF
                 if compute_high:
-                    rf_high = rf_models['high'](high_features)
-                    zs_high.append(high_features.cpu())
+                    high_features_norm = F.normalize(high_features, dim=1)
+                    rf_high = rf_models['high'](high_features_norm)
+                    zs_high.append(high_features_norm.cpu())  # 存储归一化版本用于统计量计算
                     rfs_high.append(rf_high.cpu())
                 
                 if compute_low:
-                    rf_low = rf_models['low'](low_features)
-                    zs_low.append(low_features.cpu())
+                    low_features_norm = F.normalize(low_features, dim=1)
+                    rf_low = rf_models['low'](low_features_norm)
+                    zs_low.append(low_features_norm.cpu())  # 存储归一化版本用于统计量计算
                     rfs_low.append(rf_low.cpu())
 
         # 将列表拼接成大张量
@@ -1238,13 +1251,17 @@ def test_inference_new_het(args, local_model_list, test_dataset, global_protos=[
         for protos in protos_list:
             ensem_proto += protos
         ensem_proto /= len(protos_list)
+        
+        # 归一化后再计算距离，保证距离计算的一致性
+        ensem_proto_norm = F.normalize(ensem_proto, dim=1)
 
         a_large_num = 100
         outputs = a_large_num * torch.ones(size=(images.shape[0], 10)).to(device)  # outputs 64*10
         for i in range(images.shape[0]):
             for j in range(10):
                 if j in global_protos.keys():
-                    dist = loss_mse(ensem_proto[i,:],global_protos[j][0])
+                    global_proto_norm = F.normalize(global_protos[j][0].unsqueeze(0), dim=1).squeeze(0)
+                    dist = loss_mse(ensem_proto_norm[i,:], global_proto_norm)
                     outputs[i,j] = dist
 
         # Prediction
@@ -1312,12 +1329,15 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
                 protos = high_protos  # 使用 high_protos 作为原型
 
                 # compute the dist between protos and global_protos
+                # 归一化后再计算距离，保证距离计算的一致性
+                protos_norm = F.normalize(protos, dim=1)
                 a_large_num = 100
                 dist = a_large_num * torch.ones(size=(images.shape[0], args.num_classes)).to(device)  # initialize a distance matrix
                 for i in range(images.shape[0]):
                     for j in range(args.num_classes):
                         if j in global_protos.keys() and j in classes_list[idx]:
-                            d = loss_mse(protos[i, :], global_protos[j][0])
+                            global_proto_norm = F.normalize(global_protos[j][0].unsqueeze(0), dim=1).squeeze(0)
+                            d = loss_mse(protos_norm[i, :], global_proto_norm)
                             dist[i, j] = d
 
                 # prediction
@@ -1327,13 +1347,16 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
                 total_w += len(labels)
 
                 # compute loss
+                # 归一化后再计算MSE损失，保证一致性
                 proto_new = copy.deepcopy(protos.data)
                 i = 0
                 for label in labels:
                     if label.item() in global_protos.keys():
                         proto_new[i, :] = global_protos[label.item()][0].data
                     i += 1
-                loss2 = loss_mse(proto_new, protos)
+                proto_new_norm = F.normalize(proto_new, dim=1)
+                protos_norm_for_loss = F.normalize(protos, dim=1)
+                loss2 = loss_mse(proto_new_norm, protos_norm_for_loss)
                 # loss1 = loss_function(probs, labels)
                 loss1 = criterion(outputs, labels)
                 if args.device == 'cuda':
@@ -1401,12 +1424,15 @@ def test_inference_fedproto(args,logger, local_model_list, test_dataset, classes
                 protos = high_protos  # 使用 high_protos 作为原型
 
                 # compute the dist between protos and global_protos
+                # 归一化后再计算距离，保证距离计算的一致性
+                protos_norm = F.normalize(protos, dim=1)
                 a_large_num = 10000
                 dist = a_large_num * torch.ones(size=(images.shape[0], args.num_classes)).to(device)  # initialize a distance matrix
                 for i in range(images.shape[0]):
                     for j in range(args.num_classes):
                         if j in global_protos.keys() and j in classes_list[idx]:
-                            d = loss_mse(protos[i, :], global_protos[j][0])
+                            global_proto_norm = F.normalize(global_protos[j][0].unsqueeze(0), dim=1).squeeze(0)
+                            d = loss_mse(protos_norm[i, :], global_proto_norm)
                             dist[i, j] = d
 
                 # prediction
@@ -1416,13 +1442,16 @@ def test_inference_fedproto(args,logger, local_model_list, test_dataset, classes
                 total_w += len(labels)
 
                 # compute loss
+                # 归一化后再计算MSE损失，保证一致性
                 proto_new = copy.deepcopy(protos.data)
                 i = 0
                 for label in labels:
                     if label.item() in global_protos.keys():
                         proto_new[i, :] = global_protos[label.item()][0].data
                     i += 1
-                batch_loss2 = loss_mse(proto_new, protos)
+                proto_new_norm = F.normalize(proto_new, dim=1)
+                protos_norm_for_loss = F.normalize(protos, dim=1)
+                batch_loss2 = loss_mse(proto_new_norm, protos_norm_for_loss)
                 batch_eval_loss['2'].append(batch_loss2.item())
                 batch_loss=batch_loss1+batch_loss2
                 batch_eval_loss['total'].append(batch_loss.item())
