@@ -31,6 +31,7 @@ from lib.models.models import *
 from lib.utils import *
 from lib.sfd_utils import RFF, aggregate_global_statistics
 from lib.safs import MeanCovAligner, feature_synthesis, make_syn_nums
+import random
 
 model_urls = {
     'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
@@ -432,6 +433,114 @@ def Fedproc(args, train_dataset, test_dataset, user_groups, user_groups_lt, loca
         best_round, best_acc, best_std))
 
 
+def distribute_synthetic_features_to_clients(args, class_syn_datasets, user_groups, classes_list, train_dataset, logger=None):
+    """
+    为每个客户端分配合成特征。
+    
+    分配策略：
+    - 对于客户端缺失的类别：分配该类别的所有合成特征
+    - 对于客户端已有的类别：补充少量合成样本，使每个类别的数据量基本一致
+    
+    Args:
+        args: 参数对象
+        class_syn_datasets: feature_synthesis 返回的列表，包含 {'class_index', 'synthetic_features'}
+        user_groups: 客户端数据索引字典 {client_id: sample_indices}
+        classes_list: 每个客户端拥有的类别列表 [client_classes]
+        train_dataset: 训练数据集，用于统计每个客户端的类别数据量
+        logger: Logger 实例，可选
+    
+    Returns:
+        client_synthetic_datasets: 字典 {client_id: SyntheticFeatureDataset}
+    """
+    from lib.update import SyntheticFeatureDataset
+    
+    num_clients = args.num_users
+    num_classes = args.num_classes
+    
+    # 将 class_syn_datasets 转换为字典格式，便于访问
+    syn_features_dict = {}
+    for syn_data in class_syn_datasets:
+        class_idx = syn_data['class_index']
+        synthetic_features = syn_data['synthetic_features']  # shape: (syn_num, feature_dim)
+        syn_features_dict[class_idx] = synthetic_features
+    
+    # 为每个客户端分配合成特征
+    client_synthetic_datasets = {}
+    
+    for client_id in range(num_clients):
+        client_classes = set(classes_list[client_id])  # 客户端拥有的类别
+        
+        # 统计该客户端每个类别的真实数据量
+        local_model = LocalUpdate(args=args, dataset=train_dataset, idxs=user_groups[client_id])
+        # 从 trainloader 统计每个类别的样本数
+        all_labels = []
+        for batch_data in local_model.trainloader:
+            if isinstance(batch_data, tuple) and len(batch_data) == 2:
+                _, labels = batch_data
+                all_labels.append(labels)
+        
+        if len(all_labels) > 0:
+            all_labels_tensor = torch.cat(all_labels, dim=0)
+            real_samples_per_class = all_labels_tensor.bincount(minlength=num_classes)
+        else:
+            real_samples_per_class = torch.zeros(num_classes, dtype=torch.long)
+        
+        # 计算该客户端所有类别的最大数据量
+        client_real_samples = real_samples_per_class[list(client_classes)].tolist()
+        max_samples = max(client_real_samples) if len(client_real_samples) > 0 else 0
+        
+        # 为该客户端分配合成特征
+        client_syn_features = {}
+        
+        for class_idx in range(num_classes):
+            if class_idx not in syn_features_dict or syn_features_dict[class_idx] is None:
+                continue
+            
+            available_syn_features = syn_features_dict[class_idx]  # shape: (syn_num, feature_dim)
+            available_count = available_syn_features.shape[0]
+            
+            if class_idx not in client_classes:
+                # 缺失类别：使用全部合成特征
+                client_syn_features[class_idx] = available_syn_features
+                if logger:
+                    logger.info(f'Client {client_id}: Class {class_idx} (missing) - allocated all {available_count} synthetic features')
+            else:
+                # 已有类别：补充到 max_samples
+                real_count = int(real_samples_per_class[class_idx].item())
+                needed = max(0, max_samples - real_count)
+                take = min(needed, available_count)
+                
+                if take > 0:
+                    # 随机采样 take 个合成特征
+                    indices = torch.randperm(available_count)[:take]
+                    selected_features = available_syn_features[indices]
+                    client_syn_features[class_idx] = selected_features
+                    if logger:
+                        logger.info(f'Client {client_id}: Class {class_idx} (existing) - real: {real_count}, needed: {needed}, allocated: {take} synthetic features')
+                else:
+                    # 不需要补充，但仍然可以分配少量用于增强（可选）
+                    # 这里不分配，保持原有数据分布
+                    client_syn_features[class_idx] = None
+                    if logger:
+                        logger.info(f'Client {client_id}: Class {class_idx} (existing) - real: {real_count}, max: {max_samples}, no synthetic features needed')
+        
+        # 创建 SyntheticFeatureDataset
+        # 过滤掉 None 值
+        client_syn_features_filtered = {k: v for k, v in client_syn_features.items() if v is not None}
+        
+        if len(client_syn_features_filtered) > 0:
+            client_synthetic_datasets[client_id] = SyntheticFeatureDataset(client_syn_features_filtered)
+            total_syn = len(client_synthetic_datasets[client_id])
+            if logger:
+                logger.info(f'Client {client_id}: Total synthetic features allocated: {total_syn}')
+        else:
+            client_synthetic_datasets[client_id] = None
+            if logger:
+                logger.info(f'Client {client_id}: No synthetic features allocated')
+    
+    return client_synthetic_datasets
+
+
 def FedProto_taskheter(args, train_dataset, test_dataset, user_groups, user_groups_lt, local_model_list, classes_list, summary_writer,logger,logdir):
 
     global_protos = []
@@ -649,6 +758,9 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
     for round in tqdm(range(args.rounds)):
         local_weights, local_losses, local_high_protos, local_low_protos = [], [], {}, {}
         print(f'\n | Global Training Round : {round + 1} |\n')
+        
+        # 初始化客户端合成特征数据集（将在生成合成特征后更新）
+        client_synthetic_datasets = {idx: None for idx in range(args.num_users)}
 
         acc_list_train = []
         loss_list_train = []
@@ -667,7 +779,11 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
             scl_weight = scl_weight_start
         for idx in idxs_users:
             # local model updating
-            local_model = LocalUpdate(args=args, dataset=train_dataset, idxs=user_groups[idx])
+            # 获取该客户端的合成特征数据集（如果启用）
+            client_syn_dataset = client_synthetic_datasets.get(idx, None)
+            
+            local_model = LocalUpdate(args=args, dataset=train_dataset, idxs=user_groups[idx], 
+                                     synthetic_features_dataset=client_syn_dataset)
             # ABBL: 传递 total_rounds 参数用于计算余弦退火权重
             w, loss, acc, high_protos, low_protos, idx_acc = local_model.update_weights_fedmps(
                 args, idx, global_high_protos, global_low_protos, global_logits, 
@@ -800,11 +916,35 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
             print(f'[Round {round+1}] Generated synthetic features for {len(class_syn_datasets)} classes')
             logger.info(f'[Round {round+1}] Generated synthetic features for {len(class_syn_datasets)} classes')
             
+            # ========== 为客户端分配合成特征 ==========
+            # 检查是否启用客户端使用合成特征
+            enable_client_syn = getattr(args, 'enable_client_synthetic_features', 1)
+            if enable_client_syn == 1:
+                print(f'[Round {round+1}] Distributing synthetic features to clients...')
+                logger.info(f'[Round {round+1}] Distributing synthetic features to clients...')
+                
+                client_synthetic_datasets = distribute_synthetic_features_to_clients(
+                    args=args,
+                    class_syn_datasets=class_syn_datasets,
+                    user_groups=user_groups,
+                    classes_list=classes_list,
+                    train_dataset=train_dataset,
+                    logger=logger
+                )
+                
+                print(f'[Round {round+1}] Synthetic features distributed to clients')
+                logger.info(f'[Round {round+1}] Synthetic features distributed to clients')
+            else:
+                client_synthetic_datasets = {idx: None for idx in range(args.num_users)}
+                print(f'[Round {round+1}] Client synthetic features disabled')
+                logger.info(f'[Round {round+1}] Client synthetic features disabled')
+            
             # 可选：保存合成特征数据集（用于后续的分类器微调）
             # 这里可以根据需要保存到文件或传递给分类器微调阶段
             # 例如：torch.save(class_syn_datasets, f'{logdir}/synthetic_features_round_{round+1}.pt')
         else:
             class_syn_datasets = None
+            client_synthetic_datasets = {idx: None for idx in range(args.num_users)}
         
         # ========== Global Model Training / Fine-tuning ==========
         # 根据是否启用 SAFS 选择不同的全局模型训练方式

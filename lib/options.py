@@ -19,6 +19,8 @@ def args_parser():
                         help="the number of local episodes: E")
     parser.add_argument('--local_bs', type=int, default=8,
                         help="local batch size: B")
+    parser.add_argument('--drop_last', type=int, default=1,
+                        help='whether to drop the last incomplete batch in DataLoader (0: False, 1: True, default: 1)')
     parser.add_argument('--lr', type=float, default=0.01,
                         help='learning rate')
     parser.add_argument('--momentum', type=float, default=0.5,

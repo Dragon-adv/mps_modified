@@ -25,6 +25,83 @@ class DatasetSplit(Dataset):
         return torch.tensor(image), torch.tensor(label)
 
 
+class SyntheticFeatureDataset(Dataset):
+    """
+    合成特征数据集类，用于包装合成特征数据。
+    
+    合成特征是 high-level features，可以直接用于训练模型的分类器部分。
+    """
+    
+    def __init__(self, synthetic_features_dict):
+        """
+        Args:
+            synthetic_features_dict: 字典 {class_index: tensor}，每个类别的合成特征
+                tensor shape: (num_samples, feature_dim)
+        """
+        self.features = []
+        self.labels = []
+        
+        # 将字典转换为列表格式
+        for class_idx, features in synthetic_features_dict.items():
+            if features is not None and len(features) > 0:
+                num_samples = features.shape[0]
+                labels = torch.full((num_samples,), class_idx, dtype=torch.long)
+                self.features.append(features)
+                self.labels.append(labels)
+        
+        if len(self.features) > 0:
+            self.features = torch.cat(self.features, dim=0)
+            self.labels = torch.cat(self.labels, dim=0)
+        else:
+            # 空数据集
+            self.features = torch.empty(0)
+            self.labels = torch.empty(0, dtype=torch.long)
+    
+    def __len__(self):
+        return len(self.labels)
+    
+    def __getitem__(self, item):
+        # 返回 (feature, label)，其中 feature 是 high-level feature
+        # 注意：这里返回的是特征，不是图像
+        return self.features[item], self.labels[item]
+
+
+class MixedDataset(Dataset):
+    """
+    混合数据集类，用于混合真实图像数据和合成特征数据。
+    
+    在训练时，每个batch会随机从两种数据源中采样。
+    """
+    
+    def __init__(self, real_dataset, synthetic_dataset, mix_ratio=0.5):
+        """
+        Args:
+            real_dataset: DatasetSplit 实例，包含真实图像数据
+            synthetic_dataset: SyntheticFeatureDataset 实例，包含合成特征数据
+            mix_ratio: 合成特征在batch中的比例（0-1之间）
+        """
+        self.real_dataset = real_dataset
+        self.synthetic_dataset = synthetic_dataset
+        self.mix_ratio = mix_ratio
+        self.real_len = len(real_dataset) if real_dataset is not None else 0
+        self.syn_len = len(synthetic_dataset) if synthetic_dataset is not None else 0
+        self.total_len = self.real_len + self.syn_len
+    
+    def __len__(self):
+        return self.total_len
+    
+    def __getitem__(self, item):
+        # 根据 mix_ratio 决定从哪个数据集采样
+        # 为了简化，我们按顺序交替采样，实际使用时 DataLoader 会 shuffle
+        if item < self.real_len:
+            # 从真实数据集采样
+            return self.real_dataset[item]
+        else:
+            # 从合成特征数据集采样
+            syn_idx = item - self.real_len
+            return self.synthetic_dataset[syn_idx]
+
+
 class LocalUpdate(object):
     """
         本地训练执行器类，负责在联邦学习中管理单个客户端的训练过程。
@@ -35,9 +112,17 @@ class LocalUpdate(object):
         3. 梯度计算与优化：管理本地模型在指定设备（GPU/CPU）上的反向传播、权重更新及指标计算。
         4. 结果反馈：向服务器返回更新后的模型状态字典（state_dict）及相关的算法元数据（如原型 Prototypes）。
     """
-    def __init__(self, args, dataset, idxs):
+    def __init__(self, args, dataset, idxs, synthetic_features_dataset=None):
+        """
+        Args:
+            args: 参数对象
+            dataset: 真实数据集
+            idxs: 数据索引
+            synthetic_features_dataset: SyntheticFeatureDataset 实例，可选
+        """
         self.args = args
-        self.trainloader = self.train_val_test(dataset, list(idxs))
+        self.synthetic_features_dataset = synthetic_features_dataset
+        self.trainloader = self.train_val_test(dataset, list(idxs), synthetic_features_dataset)
         self.device = args.device
         self.criterion = nn.NLLLoss().to(self.device)   # Negative Log Likelihood Loss; nn.CrossEntropyLoss = nn.LogSoftmax + nn.NLLLoss
         self.ntd_criterion = NTD_Loss(args.num_classes, args.ntd_tau, args.ntd_beta)
@@ -46,8 +131,10 @@ class LocalUpdate(object):
         # ABBL: 统计当前 Client 数据集的每个类别样本数量
         # 遍历 trainloader 收集所有标签
         all_labels = []
-        for _, labels in self.trainloader:
-            all_labels.append(labels)
+        for batch_data in self.trainloader:
+            if isinstance(batch_data, tuple) and len(batch_data) == 2:
+                _, labels = batch_data
+                all_labels.append(labels)
         # 拼接所有标签并统计每个类别的样本数
         if len(all_labels) > 0:
             all_labels_tensor = torch.cat(all_labels, dim=0)
@@ -61,14 +148,32 @@ class LocalUpdate(object):
         # 移动到设备
         self.pi_sample_per_class = self.pi_sample_per_class.to(self.device)
 
-    def train_val_test(self, dataset, idxs):
+    def train_val_test(self, dataset, idxs, synthetic_features_dataset=None):
         """
         Returns train, validation and test dataloaders for a given dataset
         and user indexes.
+        
+        Args:
+            dataset: 真实数据集
+            idxs: 数据索引
+            synthetic_features_dataset: SyntheticFeatureDataset 实例，可选
         """
         idxs_train = idxs[:int(1 * len(idxs))]
-        trainloader = DataLoader(DatasetSplit(dataset, idxs_train),
-                                 batch_size=self.args.local_bs, shuffle=True, drop_last=True)
+        drop_last = bool(getattr(self.args, 'drop_last', 1))
+        
+        # 创建真实数据集
+        real_dataset = DatasetSplit(dataset, idxs_train)
+        
+        # 如果有合成特征，创建混合数据集
+        if synthetic_features_dataset is not None and len(synthetic_features_dataset) > 0:
+            mix_ratio = getattr(self.args, 'synthetic_feature_mix_ratio', 0.5)
+            mixed_dataset = MixedDataset(real_dataset, synthetic_features_dataset, mix_ratio)
+            trainloader = DataLoader(mixed_dataset,
+                                     batch_size=self.args.local_bs, shuffle=True, drop_last=drop_last)
+        else:
+            # 只使用真实数据
+            trainloader = DataLoader(real_dataset,
+                                     batch_size=self.args.local_bs, shuffle=True, drop_last=drop_last)
 
         return trainloader
 
@@ -641,12 +746,37 @@ class LocalUpdate(object):
             batch_loss = {'total': [], 'ace': [], 'scl': [], 'proto_high': [], 'proto_low': [], 'soft': []}
             agg_high_protos_label = {}
             agg_low_protos_label = {}
-            for batch_idx, (images, label_g) in enumerate(self.trainloader):
-                images, labels = images.to(self.device), label_g.to(self.device)
-
-                model.zero_grad()
-                # ABBL: 获取 5 个返回值（包括 projected_features）
-                logits, log_probs, high_protos, low_protos, projected_features = model(images)
+            for batch_idx, batch_data in enumerate(self.trainloader):
+                # 处理混合数据：可能是 (images, labels) 或 (features, labels)
+                if isinstance(batch_data, tuple) and len(batch_data) == 2:
+                    data, label_g = batch_data
+                    labels = label_g.to(self.device)
+                    
+                    # 判断是图像还是特征（通过维度判断）
+                    # 图像通常是 4D (batch, channels, height, width)
+                    # 特征通常是 2D (batch, feature_dim)
+                    if len(data.shape) == 4:
+                        # 真实图像数据
+                        images = data.to(self.device)
+                        model.zero_grad()
+                        # ABBL: 获取 5 个返回值（包括 projected_features）
+                        logits, log_probs, high_protos, low_protos, projected_features = model(images)
+                    elif len(data.shape) == 2:
+                        # 合成特征数据
+                        high_features = data.to(self.device)
+                        model.zero_grad()
+                        # 从 high-level features 开始前向传播
+                        logits, log_probs, high_protos, low_protos, projected_features = self.forward_from_high_features(
+                            model, high_features, args
+                        )
+                    else:
+                        raise ValueError(f"Unexpected data shape: {data.shape}")
+                else:
+                    # 兼容旧格式
+                    images, label_g = batch_data
+                    images, labels = images.to(self.device), label_g.to(self.device)
+                    model.zero_grad()
+                    logits, log_probs, high_protos, low_protos, projected_features = model(images)
 
                 # Loss 1 (ABBL): L_ACE - 自适应交叉熵损失
                 # 关键：传入原始 logits，而非 log_probs
@@ -757,6 +887,80 @@ class LocalUpdate(object):
 
         return model.state_dict(), epoch_loss, acc_val.item(), agg_high_protos_label, agg_low_protos_label, acc_last_epoch
 
+
+    def forward_from_high_features(self, model, high_features, args):
+        """
+        从 high-level features 开始前向传播，用于处理合成特征。
+        
+        Args:
+            model: 模型实例
+            high_features: high-level features tensor, shape (batch_size, feature_dim)
+            args: 参数对象，用于确定数据集类型
+            
+        Returns:
+            (logits, log_probs, high_level_features_raw, low_level_features_raw, projected_features)
+            注意：对于合成特征，low_level_features_raw 设置为与 high_level_features_raw 相同
+        """
+        device = high_features.device
+        batch_size = high_features.shape[0]
+        
+        # 归一化 high-level features
+        high_level_features = F.normalize(high_features, dim=1)
+        high_level_features_raw = high_features  # 未归一化版本
+        
+        # 根据数据集类型确定模型结构
+        dataset = args.dataset
+        
+        if dataset == 'mnist' or dataset == 'femnist':
+            # CNNMnist/CNNFemnist: high_features -> fc2
+            feat_for_classifier = F.dropout(high_level_features, training=model.training)
+            logits = model.fc2(feat_for_classifier)
+            log_probs = F.log_softmax(logits, dim=1)
+            proj_output = model.projector(high_level_features)
+            projected_features = F.normalize(proj_output, dim=1)
+            # 对于合成特征，low_level_features 设置为与 high_level_features 相同
+            low_level_features_raw = high_level_features_raw
+            
+        elif dataset == 'cifar10' or dataset == 'realwaste' or dataset == 'flowers' or dataset == 'defungi':
+            # CNNCifar: high_features -> fc1 -> fc2
+            feat_for_classifier = F.relu(model.fc1(high_level_features))
+            logits = model.fc2(feat_for_classifier)
+            log_probs = F.log_softmax(logits, dim=1)
+            proj_output = model.projector(high_level_features)
+            projected_features = F.normalize(proj_output, dim=1)
+            low_level_features_raw = high_level_features_raw
+            
+        elif dataset == 'fashion':
+            # CNNFashion_Mnist: high_features -> fc
+            logits = model.fc(high_level_features)
+            log_probs = F.log_softmax(logits, dim=1)
+            proj_output = model.projector(high_level_features)
+            projected_features = F.normalize(proj_output, dim=1)
+            low_level_features_raw = high_level_features_raw
+            
+        elif dataset == 'tinyimagenet' or dataset == 'cifar100':
+            # ModelCT: high_features -> l2 -> l3
+            feat_for_classifier = model.l2(high_level_features)
+            logits = model.l3(feat_for_classifier)
+            log_probs = F.log_softmax(logits, dim=1)
+            proj_output = model.projector(high_level_features)
+            projected_features = F.normalize(proj_output, dim=1)
+            low_level_features_raw = high_level_features_raw
+            
+        elif dataset == 'imagenet':
+            # ResNetWithFeatures: high_features -> fc
+            logits = model.fc(high_level_features_raw)  # 注意：fc使用未归一化的
+            log_probs = F.log_softmax(logits, dim=1)
+            proj_output = model.projector(high_level_features)
+            projected_features = F.normalize(proj_output, dim=1)
+            low_level_features_raw = high_level_features_raw
+            
+        else:
+            # 默认处理：假设 high_features 直接输入分类器
+            # 这需要根据具体模型调整
+            raise ValueError(f"Unsupported dataset for synthetic features: {dataset}")
+        
+        return logits, log_probs, high_level_features_raw, low_level_features_raw, projected_features
 
     def hcall(self,global_protos):
         global_labels = []

@@ -3,7 +3,11 @@ FedMPS: https://github.com/wenxinyang1026/FedMPS
 SFD: https://github.com/zhb2000/SFD
 
 ```bash
-python exps/federated_main.py --alg ours --dataset cifar10 --num_classes 10 --num_users 20 --ways 3 --shots 100 --train_shots_max 110 --test_shots 15 --stdev 1 --alph 1 --beta 0.2 --gama 5 --rounds 500 --gpu 0 --enable_safs 1
+python exps/federated_main.py --alg ours --dataset cifar10 --num_classes 10 --num_users 20 --ways 3 --shots 100 --train_shots_max 110 --test_shots 15 --stdev 1 --alph 0.1 --beta 0.02 --gama 5 --rounds 500 --gpu 0 --enable_safs 1
+```
+
+```bash
+python exps/federated_main.py --alg ours --dataset cifar10 --num_classes 10 --num_users 20 --ways 3 --shots 100 --train_shots_max 110 --test_shots 15 --stdev 1 --alph 0.1 --beta 0.02 --rounds 500 --gpu 0 --enable_safs 1 --gama 1.0 --scl_weight_end 0.2 --safs_max_syn_num 1000 --safs_min_syn_num 1000
 ```
 
 
