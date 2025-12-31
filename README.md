@@ -10,6 +10,10 @@ python exps/federated_main.py --alg ours --dataset cifar10 --num_classes 10 --nu
 python exps/federated_main.py --alg ours --dataset cifar10 --num_classes 10 --num_users 20 --ways 3 --shots 100 --train_shots_max 110 --test_shots 15 --stdev 1 --alph 0.1 --beta 0.02 --rounds 500 --gpu 0 --enable_safs 1 --gama 1.0 --scl_weight_end 0.2 --safs_max_syn_num 1000 --safs_min_syn_num 1000
 ```
 
+```bash
+python exps/federated_main.py --alg ours --dataset cifar10 --num_classes 10 --num_users 20 --ways 3 --shots 100 --train_shots_max 110 --test_shots 15 --stdev 1 --alph 0.1 --beta 0.02 --gama 5 --rounds 500 --gpu 0 --enable_safs 1 --real_use_adaptive_ce 1 --real_use_adaptive_scl 1 --synthetic_use_adaptive_ce 0 --synthetic_soft_weight 1
+```
+
 
 
 # FedMPS: Federated Learning in a Synergy of Multi-Level Prototype-Based Contrastive Learning and Soft Label Generation

@@ -146,10 +146,27 @@ def args_parser():
                         help='Ratio of synthetic features in batch (0-1, default: 0.5, not used in current implementation)')
 
     # for Loss Function Selection (CE vs A-CE, SCL vs A-SCL)
-    parser.add_argument('--use_adaptive_ce', type=int, default=0,
-                        help='Use adaptive cross-entropy loss (L_ACE) instead of standard CE (0: use standard CE, 1: use L_ACE, default: 0)')
-    parser.add_argument('--use_adaptive_scl', type=int, default=0,
-                        help='Use adaptive supervised contrastive loss (L_A-SCL) instead of standard SCL (0: use standard SCL, 1: use L_A-SCL, default: 0)')
+    # Global settings (for backward compatibility, used if per-data-type settings are not specified)
+    parser.add_argument('--use_adaptive_ce', type=int, default=1,
+                        help='Use adaptive cross-entropy loss (L_ACE) instead of standard CE (0: use standard CE, 1: use L_ACE, default: 1). Used as fallback if --real_use_adaptive_ce or --synthetic_use_adaptive_ce are not specified.')
+    parser.add_argument('--use_adaptive_scl', type=int, default=1,
+                        help='Use adaptive supervised contrastive loss (L_A-SCL) instead of standard SCL (0: use standard SCL, 1: use L_A-SCL, default: 1). Used as fallback if --real_use_adaptive_scl or --synthetic_use_adaptive_scl are not specified.')
+    
+    # Per-data-type loss function selection (independent configuration for real and synthetic data)
+    parser.add_argument('--real_use_adaptive_ce', type=int, default=None,
+                        help='Use adaptive cross-entropy loss (L_ACE) for real data (0: use standard CE, 1: use L_ACE, default: None, falls back to --use_adaptive_ce)')
+    parser.add_argument('--real_use_adaptive_scl', type=int, default=None,
+                        help='Use adaptive supervised contrastive loss (L_A-SCL) for real data (0: use standard SCL, 1: use L_A-SCL, default: None, falls back to --use_adaptive_scl)')
+    parser.add_argument('--synthetic_use_adaptive_ce', type=int, default=None,
+                        help='Use adaptive cross-entropy loss (L_ACE) for synthetic data (0: use standard CE, 1: use L_ACE, default: None, falls back to --use_adaptive_ce)')
+    parser.add_argument('--synthetic_use_adaptive_scl', type=int, default=None,
+                        help='Use adaptive supervised contrastive loss (L_A-SCL) for synthetic data (0: use standard SCL, 1: use L_A-SCL, default: None, falls back to --use_adaptive_scl). Note: SCL loss is typically disabled for synthetic data.')
+
+    # for Synthetic Data Loss Weights (independent from real data)
+    parser.add_argument('--synthetic_ce_weight', type=float, default=1.0,
+                        help='Weight coefficient for cross-entropy loss (L_ACE or standard CE) on synthetic data (default: 1.0, independent from real data)')
+    parser.add_argument('--synthetic_soft_weight', type=float, default=None,
+                        help='Weight coefficient for soft label distillation loss on synthetic data (default: None, uses --gama value if not specified, independent from real data)')
 
     args = parser.parse_args()
     return args

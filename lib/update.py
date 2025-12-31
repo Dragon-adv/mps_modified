@@ -900,8 +900,16 @@ class LocalUpdate(object):
                         scl_weight, is_synthetic
                     )
                     
+                    # 获取合成数据的独立权重系数
+                    synthetic_ce_weight = getattr(args, 'synthetic_ce_weight', 1.0)
+                    synthetic_soft_weight = getattr(args, 'synthetic_soft_weight', None)
+                    if synthetic_soft_weight is None:
+                        # 如果未指定，则使用真实数据的权重（args.gama）
+                        synthetic_soft_weight = args.gama
+                    
                     # 总损失（注意：loss_proto_low 应该为 0，因为 is_synthetic=True）
-                    loss = loss_ace + scl_weight * loss_scl + args.alph * loss_proto_high + args.beta * loss_proto_low + args.gama * loss_soft
+                    # 使用合成数据的独立权重系数：synthetic_ce_weight 和 synthetic_soft_weight
+                    loss = synthetic_ce_weight * loss_ace + scl_weight * loss_scl + args.alph * loss_proto_high + args.beta * loss_proto_low + synthetic_soft_weight * loss_soft
                     
                     loss.backward()
                     optimizer.step()
@@ -988,7 +996,18 @@ class LocalUpdate(object):
         import torch.nn.functional as F
         
         # Loss 1: 选择使用标准 CE 或自适应 CE (L_ACE)
-        use_adaptive_ce = getattr(args, 'use_adaptive_ce', 0)
+        # 根据数据类型（真实/合成）选择对应的损失函数配置
+        if is_synthetic:
+            # 合成数据：优先使用 synthetic_use_adaptive_ce，否则回退到全局 use_adaptive_ce
+            use_adaptive_ce = getattr(args, 'synthetic_use_adaptive_ce', None)
+            if use_adaptive_ce is None:
+                use_adaptive_ce = getattr(args, 'use_adaptive_ce', 0)
+        else:
+            # 真实数据：优先使用 real_use_adaptive_ce，否则回退到全局 use_adaptive_ce
+            use_adaptive_ce = getattr(args, 'real_use_adaptive_ce', None)
+            if use_adaptive_ce is None:
+                use_adaptive_ce = getattr(args, 'use_adaptive_ce', 0)
+        
         if use_adaptive_ce == 1:
             # 使用自适应交叉熵损失 (L_ACE)
             a_ce_gamma = getattr(args, 'a_ce_gamma', 0.1)
@@ -1009,7 +1028,11 @@ class LocalUpdate(object):
             loss_scl = 0 * loss_ace
         else:
             # 真实数据：计算对比学习损失，用于训练 encoder 学习更好的特征表示
-            use_adaptive_scl = getattr(args, 'use_adaptive_scl', 0)
+            # 根据数据类型选择对应的损失函数配置
+            use_adaptive_scl = getattr(args, 'real_use_adaptive_scl', None)
+            if use_adaptive_scl is None:
+                use_adaptive_scl = getattr(args, 'use_adaptive_scl', 0)
+            
             if use_adaptive_scl == 1:
                 # 使用自适应监督对比学习损失 (L_A-SCL)
                 loss_scl = self.compute_adaptive_supervised_contrastive_loss(
