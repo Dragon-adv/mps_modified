@@ -434,22 +434,113 @@ def Fedproc(args, train_dataset, test_dataset, user_groups, user_groups_lt, loca
         best_round, best_acc, best_std))
 
 
-def distribute_synthetic_features_to_clients(args, class_syn_datasets, user_groups, classes_list, train_dataset, global_sample_per_class=None, logger=None):
+def get_safs_params(args, level='high'):
+    """
+    获取 SAFS 参数（高级或低级特征专用）。
+    
+    参数:
+        args: 参数对象
+        level: 'high' 或 'low'，指定获取哪个层级的参数
+    
+    返回:
+        dict: 包含所有 SAFS 参数的字典
+    """
+    if level == 'low':
+        # 低级特征专用参数，如果未设置则使用高级特征参数
+        return {
+            'steps': getattr(args, 'safs_steps_low', None) or getattr(args, 'safs_steps', 200),
+            'lr': getattr(args, 'safs_lr_low', None) or getattr(args, 'safs_lr', 0.1),
+            'max_syn_num': getattr(args, 'safs_max_syn_num_low', None) or getattr(args, 'safs_max_syn_num', 600),
+            'min_syn_num': getattr(args, 'safs_min_syn_num_low', None) or getattr(args, 'safs_min_syn_num', 600),
+            'target_cov_eps': getattr(args, 'safs_target_cov_eps_low', None) or getattr(args, 'safs_target_cov_eps', 1e-5),
+            'input_cov_eps': getattr(args, 'safs_input_cov_eps_low', None) or getattr(args, 'safs_input_cov_eps', 1e-5),
+        }
+    else:  # level == 'high'
+        # 高级特征参数
+        return {
+            'steps': getattr(args, 'safs_steps', 200),
+            'lr': getattr(args, 'safs_lr', 0.1),
+            'max_syn_num': getattr(args, 'safs_max_syn_num', 600),
+            'min_syn_num': getattr(args, 'safs_min_syn_num', 600),
+            'target_cov_eps': getattr(args, 'safs_target_cov_eps', 1e-5),
+            'input_cov_eps': getattr(args, 'safs_input_cov_eps', 1e-5),
+        }
+
+
+def compute_and_validate_syn_nums(class_sizes, feature_dim, max_syn_num, min_syn_num, level='high', logger=None):
+    """
+    计算并验证合成特征数量，如果不足则自动调整。
+    
+    参数:
+        class_sizes: 每个类别的样本数列表
+        feature_dim: 特征维度
+        max_syn_num: 最大合成特征数量
+        min_syn_num: 最小合成特征数量
+        level: 'high' 或 'low'，用于日志信息
+        logger: Logger 实例，可选
+    
+    返回:
+        list: 每个类别的合成特征数量列表
+    """
+    
+    # 计算初始合成特征数量
+    syn_nums = make_syn_nums(
+        class_sizes=class_sizes,
+        max_num=max_syn_num,
+        min_num=min_syn_num
+    )
+    
+    # 检查是否需要自动调整
+    if min(syn_nums) <= feature_dim:
+        # 自动调整：确保最小合成数量至少是特征维度的1.5倍
+        adjusted_min = max(int(feature_dim * 1.5), min_syn_num)
+        adjusted_max = max(adjusted_min, max_syn_num)
+        
+        warning_msg = (
+            f'[Warning] {level}-level feature dimension ({feature_dim}) is >= min synthetic number ({min(syn_nums)}). '
+            f'Auto-adjusting: min_syn_num={adjusted_min}, max_syn_num={adjusted_max}'
+        )
+        print(warning_msg)
+        if logger:
+            logger.warning(warning_msg)
+        
+        # 重新计算
+        syn_nums = make_syn_nums(
+            class_sizes=class_sizes,
+            max_num=adjusted_max,
+            min_num=adjusted_min
+        )
+    
+    # 最终验证
+    assert min(syn_nums) > feature_dim, \
+        f'{level}-level: 最小合成特征数量 {min(syn_nums)} 必须大于特征维度 {feature_dim}'
+    
+    return syn_nums
+
+
+def distribute_synthetic_features_to_clients(args, class_syn_datasets, user_groups, classes_list, train_dataset, logger=None):
     """
     为每个客户端分配合成特征。
     
-    分配策略：
-    - 对于每个类别，计算目标样本数（全局该类别的平均样本数）
+    分配策略（由 args.synthetic_feature_distribution_strategy 控制）：
+    
+    策略1 'max'（默认）：
+    - 对于每个客户端，计算该客户端拥有的类别的最大样本数作为目标
     - 对于客户端缺失的类别：补充到目标样本数（该类只有合成数据）
     - 对于客户端已有的类别：补充到目标样本数
+    - 这样，每个客户端的所有类别（包括缺失的类别）都会有相同的样本数
+    
+    策略2 'min_ratio'：
+    - 对于每个客户端，计算该客户端拥有的类别的最小样本数
+    - 对于客户端缺失的类别：补充到（最小样本数 * min_ratio），默认80%
+    - 对于客户端已有的类别：不补充（保持原有样本数）
     
     Args:
-        args: 参数对象
+        args: 参数对象，需要包含 synthetic_feature_distribution_strategy 和 synthetic_feature_min_ratio
         class_syn_datasets: feature_synthesis 返回的列表，包含 {'class_index', 'synthetic_features'}
         user_groups: 客户端数据索引字典 {client_id: sample_indices}
         classes_list: 每个客户端拥有的类别列表 [client_classes]
         train_dataset: 训练数据集，用于统计每个客户端的类别数据量
-        global_sample_per_class: 全局每个类别的总样本数，形状 (num_classes,)。如果为None，则使用客户端内最大样本数
         logger: Logger 实例，可选
     
     Returns:
@@ -459,14 +550,6 @@ def distribute_synthetic_features_to_clients(args, class_syn_datasets, user_grou
     
     num_clients = args.num_users
     num_classes = args.num_classes
-    
-    # 计算每个类别的目标样本数（全局平均）
-    if global_sample_per_class is not None:
-        # 使用全局每个类别的平均样本数作为目标
-        target_samples_per_class = (global_sample_per_class.float() / num_clients).ceil().long()
-    else:
-        # 如果没有提供全局统计，则使用None（将在每个客户端内部计算）
-        target_samples_per_class = None
     
     # 将 class_syn_datasets 转换为字典格式，便于访问
     syn_features_dict = {}
@@ -503,11 +586,27 @@ def distribute_synthetic_features_to_clients(args, class_syn_datasets, user_grou
         else:
             real_samples_per_class = torch.zeros(num_classes, dtype=torch.long)
         
-        # 如果没有提供全局统计，则使用该客户端所有类别的最大数据量作为目标
-        if target_samples_per_class is None:
+        # 根据分配策略计算目标样本数
+        distribution_strategy = getattr(args, 'synthetic_feature_distribution_strategy', 'max')
+        min_ratio = getattr(args, 'synthetic_feature_min_ratio', 0.8)
+        
+        if distribution_strategy == 'min_ratio':
+            # 策略2：只对缺失类别补充到最少类别的80%
             client_real_samples = real_samples_per_class[list(client_classes)].tolist()
-            default_target = max(client_real_samples) if len(client_real_samples) > 0 else 0
-            target_samples_per_class = torch.full((num_classes,), default_target, dtype=torch.long)
+            min_samples = min(client_real_samples) if len(client_real_samples) > 0 else 0
+            target_for_missing = int(min_samples * min_ratio)
+            # 对于已有类别，目标为0（不补充）
+            # 对于缺失类别，目标为 target_for_missing
+            target_samples_per_class = torch.zeros(num_classes, dtype=torch.long)
+            for class_idx in range(num_classes):
+                if class_idx not in client_classes:
+                    target_samples_per_class[class_idx] = target_for_missing
+        else:
+            # 策略1（默认）：所有类别补充到最大样本数
+            client_real_samples = real_samples_per_class[list(client_classes)].tolist()
+            max_samples = max(client_real_samples) if len(client_real_samples) > 0 else 0
+            # 所有类别都使用这个最大值作为目标
+            target_samples_per_class = torch.full((num_classes,), max_samples, dtype=torch.long)
         
         # 为该客户端分配合成特征
         client_syn_features = {}
@@ -607,14 +706,21 @@ def distribute_synthetic_low_features_to_clients(args, class_syn_low_datasets, u
     """
     为每个客户端分配合成的低级特征。
     
-    分配策略：
+    分配策略（由 args.synthetic_feature_distribution_strategy 控制）：
+    
+    策略1 'max'（默认）：
     - 对于每个客户端，计算该客户端拥有的类别的最大样本数作为目标
     - 对于客户端缺失的类别：补充到目标样本数（该类只有合成数据）
     - 对于客户端已有的类别：补充到目标样本数
     - 这样，每个客户端的所有类别（包括缺失的类别）都会有相同的样本数
     
+    策略2 'min_ratio'：
+    - 对于每个客户端，计算该客户端拥有的类别的最小样本数
+    - 对于客户端缺失的类别：补充到（最小样本数 * min_ratio），默认80%
+    - 对于客户端已有的类别：不补充（保持原有样本数）
+    
     Args:
-        args: 参数对象
+        args: 参数对象，需要包含 synthetic_feature_distribution_strategy 和 synthetic_feature_min_ratio
         class_syn_low_datasets: feature_synthesis 返回的列表，包含 {'class_index', 'synthetic_features'}（低级特征）
         user_groups: 客户端数据索引字典 {client_id: sample_indices}
         classes_list: 每个客户端拥有的类别列表 [client_classes]
@@ -662,11 +768,27 @@ def distribute_synthetic_low_features_to_clients(args, class_syn_low_datasets, u
         else:
             real_samples_per_class = torch.zeros(num_classes, dtype=torch.long)
         
-        # 计算该客户端拥有的类别的最大样本数作为目标
-        client_real_samples = real_samples_per_class[list(client_classes)].tolist()
-        max_samples = max(client_real_samples) if len(client_real_samples) > 0 else 0
-        # 所有类别都使用这个最大值作为目标
-        target_samples_per_class = torch.full((num_classes,), max_samples, dtype=torch.long)
+        # 根据分配策略计算目标样本数
+        distribution_strategy = getattr(args, 'synthetic_feature_distribution_strategy', 'max')
+        min_ratio = getattr(args, 'synthetic_feature_min_ratio', 0.8)
+        
+        if distribution_strategy == 'min_ratio':
+            # 策略2：只对缺失类别补充到最少类别的80%
+            client_real_samples = real_samples_per_class[list(client_classes)].tolist()
+            min_samples = min(client_real_samples) if len(client_real_samples) > 0 else 0
+            target_for_missing = int(min_samples * min_ratio)
+            # 对于已有类别，目标为0（不补充）
+            # 对于缺失类别，目标为 target_for_missing
+            target_samples_per_class = torch.zeros(num_classes, dtype=torch.long)
+            for class_idx in range(num_classes):
+                if class_idx not in client_classes:
+                    target_samples_per_class[class_idx] = target_for_missing
+        else:
+            # 策略1（默认）：所有类别补充到最大样本数
+            client_real_samples = real_samples_per_class[list(client_classes)].tolist()
+            max_samples = max(client_real_samples) if len(client_real_samples) > 0 else 0
+            # 所有类别都使用这个最大值作为目标
+            target_samples_per_class = torch.full((num_classes,), max_samples, dtype=torch.long)
         
         # 为该客户端分配合成的低级特征
         client_syn_low_features = {}
@@ -1072,19 +1194,25 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
             class_rf_means = global_stats_level['class_rf_means']
             sample_per_class = global_stats['sample_per_class']
             
-            # 计算每个类别的合成特征数量
-            syn_nums = make_syn_nums(
+            # 获取对应层级的 SAFS 参数
+            safs_params = get_safs_params(args, level=level_to_use)
+            
+            # 计算每个类别的合成特征数量（带自动调整和验证）
+            syn_nums = compute_and_validate_syn_nums(
                 class_sizes=sample_per_class.tolist(),
-                max_num=getattr(args, 'safs_max_syn_num', 2000),
-                min_num=getattr(args, 'safs_min_syn_num', 600)
+                feature_dim=feature_dim,
+                max_syn_num=safs_params['max_syn_num'],
+                min_syn_num=safs_params['min_syn_num'],
+                level=level_to_use,
+                logger=logger
             )
             
-            # 验证合成特征数量是否足够（必须大于特征维度）
-            assert min(syn_nums) > feature_dim, \
-                f'最小合成特征数量 {min(syn_nums)} 必须大于特征维度 {feature_dim}'
-            
-            print(f'[Round {round+1}] Synthetic feature numbers per class: {syn_nums}')
-            logger.info(f'[Round {round+1}] Synthetic feature numbers per class: {syn_nums}')
+            print(f'[Round {round+1}] {level_to_use}-level synthetic feature numbers per class: {syn_nums}')
+            logger.info(f'[Round {round+1}] {level_to_use}-level synthetic feature numbers per class: {syn_nums}')
+            print(f'[Round {round+1}] {level_to_use}-level SAFS params: steps={safs_params["steps"]}, lr={safs_params["lr"]}, '
+                  f'feature_dim={feature_dim}')
+            logger.info(f'[Round {round+1}] {level_to_use}-level SAFS params: steps={safs_params["steps"]}, lr={safs_params["lr"]}, '
+                       f'feature_dim={feature_dim}')
             
             # 为每个类别创建 MeanCov Aligner
             aligners = []
@@ -1092,7 +1220,7 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
                 aligner = MeanCovAligner(
                     target_mean=class_means[c],
                     target_cov=class_covs[c],
-                    target_cov_eps=getattr(args, 'safs_target_cov_eps', 1e-5)
+                    target_cov_eps=safs_params['target_cov_eps']
                 )
                 aligners.append(aligner)
             
@@ -1104,10 +1232,10 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
                 aligners=aligners,
                 rf_model=rf_model,
                 class_rf_means=class_rf_means,
-                steps=getattr(args, 'safs_steps', 1000),
-                lr=getattr(args, 'safs_lr', 0.1),
+                steps=safs_params['steps'],
+                lr=safs_params['lr'],
                 syn_num_per_class=syn_nums,
-                input_cov_eps=getattr(args, 'safs_input_cov_eps', 1e-5),
+                input_cov_eps=safs_params['input_cov_eps'],
             )
             
             print(f'[Round {round+1}] SAFS feature synthesis completed ({level_to_use}-level)')
@@ -1126,6 +1254,7 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
                 if level_to_use == 'high':
                     # 保存高级特征数据集
                     class_syn_datasets_high = class_syn_datasets
+                    
                     # 合成低级特征
                     global_stats_low = global_stats['low']
                     rf_model_low = rf_models['low']
@@ -1134,15 +1263,37 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
                     class_covs_low = global_stats_low['class_covs']
                     class_rf_means_low = global_stats_low['class_rf_means']
                     
+                    # 获取低级特征专用的 SAFS 参数
+                    safs_params_low = get_safs_params(args, level='low')
+                    
+                    # 为低级特征单独计算合成特征数量（带自动调整和验证）
+                    syn_nums_low = compute_and_validate_syn_nums(
+                        class_sizes=sample_per_class.tolist(),
+                        feature_dim=feature_dim_low,
+                        max_syn_num=safs_params_low['max_syn_num'],
+                        min_syn_num=safs_params_low['min_syn_num'],
+                        level='low',
+                        logger=logger
+                    )
+                    
+                    print(f'[Round {round+1}] Low-level synthetic feature numbers per class: {syn_nums_low}')
+                    logger.info(f'[Round {round+1}] Low-level synthetic feature numbers per class: {syn_nums_low}')
+                    print(f'[Round {round+1}] Low-level SAFS params: steps={safs_params_low["steps"]}, lr={safs_params_low["lr"]}, '
+                          f'feature_dim={feature_dim_low}')
+                    logger.info(f'[Round {round+1}] Low-level SAFS params: steps={safs_params_low["steps"]}, lr={safs_params_low["lr"]}, '
+                               f'feature_dim={feature_dim_low}')
+                    
+                    # 为每个类别创建低级特征的 MeanCov Aligner
                     aligners_low = []
                     for c in range(args.num_classes):
                         aligner_low = MeanCovAligner(
                             target_mean=class_means_low[c],
                             target_cov=class_covs_low[c],
-                            target_cov_eps=getattr(args, 'safs_target_cov_eps', 1e-5)
+                            target_cov_eps=safs_params_low['target_cov_eps']
                         )
                         aligners_low.append(aligner_low)
                     
+                    # 执行低级特征合成
                     class_syn_low_datasets = feature_synthesis(
                         feature_dim=feature_dim_low,
                         class_num=args.num_classes,
@@ -1150,10 +1301,10 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
                         aligners=aligners_low,
                         rf_model=rf_model_low,
                         class_rf_means=class_rf_means_low,
-                        steps=getattr(args, 'safs_steps', 1000),
-                        lr=getattr(args, 'safs_lr', 0.1),
-                        syn_num_per_class=syn_nums,
-                        input_cov_eps=getattr(args, 'safs_input_cov_eps', 1e-5),
+                        steps=safs_params_low['steps'],
+                        lr=safs_params_low['lr'],
+                        syn_num_per_class=syn_nums_low,
+                        input_cov_eps=safs_params_low['input_cov_eps'],
                     )
                     class_syn_datasets = class_syn_datasets_high
                     print(f'[Round {round+1}] Also generated synthetic low-level features for {len(class_syn_low_datasets)} classes')
@@ -1166,18 +1317,12 @@ def FedMPS(args, train_dataset, test_dataset, user_groups, user_groups_lt, local
                 print(f'[Round {round+1}] Distributing synthetic high-level features to clients...')
                 logger.info(f'[Round {round+1}] Distributing synthetic high-level features to clients...')
                 
-                # 获取全局每个类别的样本数（用于计算目标样本数）
-                global_sample_per_class_tensor = None
-                if 'sample_per_class' in global_stats:
-                    global_sample_per_class_tensor = torch.tensor(global_stats['sample_per_class'], dtype=torch.long)
-                
                 client_synthetic_datasets = distribute_synthetic_features_to_clients(
                     args=args,
                     class_syn_datasets=class_syn_datasets,
                     user_groups=user_groups,
                     classes_list=classes_list,
                     train_dataset=train_dataset,
-                    global_sample_per_class=global_sample_per_class_tensor,
                     logger=logger
                 )
                 

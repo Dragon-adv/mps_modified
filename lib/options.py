@@ -95,9 +95,9 @@ def args_parser():
     # for SFD statistics aggregation (RFF parameters)
     parser.add_argument('--rf_seed', type=int, default=42, help='random seed for RFF model initialization')
     parser.add_argument('--rf_dim_high', type=int, default=3000, help='RFF dimension for high-level features')
-    parser.add_argument('--rf_dim_low', type=int, default=3000, help='RFF dimension for low-level features')
+    parser.add_argument('--rf_dim_low', type=int, default=5000, help='RFF dimension for low-level features')
     parser.add_argument('--rbf_gamma_high', type=float, default=0.01, help='RBF gamma parameter for high-level RFF model')
-    parser.add_argument('--rbf_gamma_low', type=float, default=0.01, help='RBF gamma parameter for low-level RFF model')
+    parser.add_argument('--rbf_gamma_low', type=float, default=0.02, help='RBF gamma parameter for low-level RFF model')
     parser.add_argument('--rf_type', type=str, default='orf', help='RFF type: orf or iid')
     parser.add_argument('--stats_level', type=str, default='high', 
                         choices=['high', 'low', 'both'],
@@ -123,6 +123,21 @@ def args_parser():
                         help='Number of epochs for SAFS global model fine-tuning (default: 5)')
     parser.add_argument('--safs_finetune_batch_size', type=int, default=32, 
                         help='Batch size for SAFS global model fine-tuning (default: 32)')
+    
+    # for SFD SAFS Low-level Feature Parameters (separate from high-level)
+    # Note: Low-level features typically have higher dimensions, requiring different optimization strategies
+    parser.add_argument('--safs_steps_low', type=int, default=None, 
+                        help='Number of optimization steps for low-level SAFS (default: None, uses --safs_steps if not specified)')
+    parser.add_argument('--safs_lr_low', type=float, default=None, 
+                        help='Learning rate for low-level SAFS (default: None, uses --safs_lr if not specified, recommended: 0.05 for higher dimensions)')
+    parser.add_argument('--safs_max_syn_num_low', type=int, default=None, 
+                        help='Maximum synthetic features for low-level smallest class (default: None, uses --safs_max_syn_num if not specified)')
+    parser.add_argument('--safs_min_syn_num_low', type=int, default=None, 
+                        help='Minimum synthetic features for low-level largest class (default: None, uses --safs_min_syn_num if not specified, auto-adjusted if <= feature_dim)')
+    parser.add_argument('--safs_target_cov_eps_low', type=float, default=None, 
+                        help='Jitter for low-level target covariance matrix (default: None, uses --safs_target_cov_eps if not specified, recommended: 1e-4 for higher dimensions)')
+    parser.add_argument('--safs_input_cov_eps_low', type=float, default=None, 
+                        help='Jitter for low-level input covariance matrix (default: None, uses --safs_input_cov_eps if not specified)')
 
     # for ABBL (Adaptive Bi-Branch Learning) - SFD loss functions
     # Note: These parameters are designed for Non-IID scenarios with potential class imbalance
@@ -180,6 +195,13 @@ def args_parser():
     parser.add_argument('--safs_synthesis_level', type=str, default='high',
                         choices=['high', 'low', 'both'],
                         help='Level of features to synthesize using SAFS: high (high-level), low (low-level), or both (default: high)')
+    
+    # for Synthetic Feature Distribution Strategy
+    parser.add_argument('--synthetic_feature_distribution_strategy', type=str, default='min_ratio',
+                        choices=['max', 'min_ratio'],
+                        help='Strategy for distributing synthetic features: max (all classes to max samples), min_ratio (missing classes to 80%% of min class, default: max)')
+    parser.add_argument('--synthetic_feature_min_ratio', type=float, default=0.8,
+                        help='Ratio for min_ratio strategy: missing classes will be supplemented to (min_class_samples * ratio), only used when strategy is min_ratio (default: 0.8)')
 
     args = parser.parse_args()
     return args
